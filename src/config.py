@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from src.env import PROJECT_ROOT, load_dotenv
@@ -29,6 +30,8 @@ MASSIVE_S3_ENDPOINT = "https://files.massive.com"
 MASSIVE_S3_BUCKET = "flatfiles"
 MASSIVE_API_BASE = "https://api.massive.com"
 MASSIVE_TICKER = "DIA"
+FINNHUB_TICKER = os.getenv("FINNHUB_SYMBOL", MASSIVE_TICKER)
+FINNHUB_BUCKET_SEC = int(os.getenv("FINNHUB_BUCKET_SEC", "60"))
 
 DATA_TYPES = {
     "stock_prices": "structured",
@@ -38,6 +41,7 @@ DATA_TYPES = {
 
 BRONZE_TABLES = {
     "stock_prices": "stock_prices",
+    "stock_prices_1m": "stock_prices_1m",
     "news_reddit": "news_reddit",
     "news_combined": "news_combined",
     "massive_day_aggs": "massive_day_aggs",

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from src.config import (  # noqa: E402
     ML_MODEL_PATH,
     ML_PREDICTIONS_PATH,
     MONITORING_HISTORY_PATH,
+    bronze_data_path,
     gold_data_path,
 )
 from src.env import load_dotenv  # noqa: E402
@@ -27,6 +29,7 @@ from src.storage.io import (  # noqa: E402
     read_parquet,
     storage_label,
 )
+from src.db.postgres import pg_enabled, read_table  # noqa: E402
 
 load_dotenv()
 
@@ -42,6 +45,11 @@ st.caption(f"Architecture Medallion : Bronze → Silver → Gold + ML | Stockage
 
 @st.cache_data
 def load_gold(_gold_mtime: float) -> pd.DataFrame:
+    if pg_enabled():
+        try:
+            return read_table("gold_daily_market_kpis")
+        except Exception:
+            pass
     path = gold_data_path()
     if not exists(path):
         return pd.DataFrame()
@@ -69,13 +77,36 @@ def load_predictions(_predictions_mtime: float) -> pd.DataFrame:
     return read_parquet(ML_PREDICTIONS_PATH)
 
 
+@st.cache_data
+def load_stock_1m(_bronze_mtime: float) -> pd.DataFrame:
+    path = bronze_data_path("stock_prices_1m")
+    if not exists(path):
+        return pd.DataFrame()
+    df = read_parquet(path)
+    for col in ("_ingestion_ts", "_source_file", "_batch_id", "_layer"):
+        if col in df.columns:
+            df = df.drop(columns=col)
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"])
+    return df.sort_values("Date", ascending=False)
+
+
 with st.sidebar:
     st.subheader("Donnees")
     if st.button("Rafraichir", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
+    st.divider()
+    st.subheader("Orchestration")
+    airflow_url = os.getenv("AIRFLOW_URL", "http://localhost:8081")
+    if hasattr(st, "link_button"):
+        st.link_button("Ouvrir Airflow", airflow_url, use_container_width=True)
+    else:
+        st.markdown(f"[Ouvrir Airflow]({airflow_url})")
+
 gold = load_gold(modified_time(gold_data_path()))
+stock_1m = load_stock_1m(modified_time(bronze_data_path("stock_prices_1m")))
 monitoring = load_monitoring_history(modified_time(MONITORING_HISTORY_PATH))
 ml_metrics = load_ml_metrics(modified_time(ML_METRICS_PATH))
 predictions = load_predictions(modified_time(ML_PREDICTIONS_PATH))
@@ -86,8 +117,15 @@ if ml_metrics:
         f"Prediction {ml_metrics.get('prediction_year', 'N/A')}"
     )
 
-tab_overview, tab_gold, tab_monitoring, tab_ml = st.tabs(
-    ["Vue d'ensemble", "Couche Gold", "Monitoring", "ML"]
+from src.storage.io import is_hdfs, hdfs_web_url  # noqa: E402
+
+if is_hdfs():
+    st.sidebar.markdown(f"**HDFS UI** : [{hdfs_web_url()}]({hdfs_web_url()})")
+    base = os.getenv("HDFS_BASE_PATH", "/datax")
+    st.sidebar.caption(f"Explorer : {hdfs_web_url()}/explorer.html#/{base.strip('/')}/lakehouse")
+
+tab_overview, tab_realtime, tab_gold, tab_monitoring, tab_ml = st.tabs(
+    ["Vue d'ensemble", "Temps reel", "Couche Gold", "Monitoring", "ML"]
 )
 
 with tab_overview:
@@ -109,6 +147,34 @@ with tab_overview:
 
     if gold.empty:
         st.warning("Pipeline non execute. Lancez : `python pipeline/run_pipeline.py`")
+
+with tab_realtime:
+    st.subheader("DIA — bougies 1 min (Finnhub WebSocket)")
+    st.caption(
+        "Source : `lakehouse/bronze/stock_prices_1m/` — "
+        "lancez `docker compose --profile stream up -d finnhub-stream` ou le script local."
+    )
+    if stock_1m.empty:
+        st.info(
+            "Aucune donnee temps reel. Ajoutez FINNHUB_TOKEN dans .env puis demarrez le stream."
+        )
+    else:
+        latest = stock_1m.iloc[0]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Dernier close", f"{latest.get('Close', 0):.2f}")
+        c2.metric("Volume (1 min)", f"{int(latest.get('Volume', 0)):,}")
+        c3.metric("Bougies", len(stock_1m))
+        c4.metric(
+            "Derniere bougie",
+            pd.to_datetime(latest["Date"]).strftime("%Y-%m-%d %H:%M") if "Date" in latest else "N/A",
+        )
+
+        chart_df = stock_1m.sort_values("Date").set_index("Date")
+        st.line_chart(chart_df["Close"].tail(120))
+        st.dataframe(
+            stock_1m.head(30),
+            use_container_width=True,
+        )
 
 with tab_gold:
     if gold.empty:

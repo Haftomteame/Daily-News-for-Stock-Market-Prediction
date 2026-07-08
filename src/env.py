@@ -8,8 +8,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def load_dotenv(path: Path | None = None) -> None:
-    env_path = path or PROJECT_ROOT / ".env"
+def load_dotenv(path: str | Path | None = None) -> None:
+    env_path = Path(path) if path is not None else PROJECT_ROOT / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():

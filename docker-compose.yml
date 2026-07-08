@@ -1,67 +1,898 @@
 services:
-  dashboard:
-    build: .
-    image: datax-stock-market:latest
-    container_name: datax-dashboard
-    ports:
-      - "8502:8502"
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      STORAGE_BACKEND: local
-      LOCAL_STORAGE_ROOT: /app
-    volumes:
-      - ./lakehouse:/app/lakehouse
-      - ./monitoring:/app/monitoring
-      - ./Data:/app/Data:ro
+
+  namenode:
+
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+
+    container_name: datax-namenode
+
+    profiles: [hdfs]
+
     restart: unless-stopped
+
+    ports:
+
+      - "9870:9870"
+
+    env_file:
+
+      - hadoop.env
+
+    environment:
+
+      - CLUSTER_NAME=datax
+
+    volumes:
+
+      - hadoop_namenode:/hadoop/dfs/name
+
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health')",
-        ]
-      interval: 30s
+
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+
+      interval: 15s
+
       timeout: 10s
+
+      retries: 10
+
+      start_period: 60s
+
+
+
+  datanode:
+
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+
+    container_name: datax-datanode
+
+    profiles: [hdfs]
+
+    restart: unless-stopped
+
+    env_file:
+
+      - hadoop.env
+
+    environment:
+
+      SERVICE_PRECONDITION: "namenode:9870"
+
+    volumes:
+
+      - hadoop_datanode:/hadoop/dfs/data
+
+    depends_on:
+
+      namenode:
+
+        condition: service_healthy
+
+  postgres:
+
+    image: postgres:16-alpine
+
+    container_name: datax-postgres
+
+    profiles: [hdfs]
+
+    restart: unless-stopped
+
+    environment:
+
+      POSTGRES_DB: wherehouse
+
+      POSTGRES_USER: datax
+
+      POSTGRES_PASSWORD: 10102026Ha
+
+    ports:
+
+      - "5432:5432"
+
+    volumes:
+
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+
+      test: ["CMD-SHELL", "pg_isready -U datax -d wherehouse"]
+
+      interval: 10s
+
+      timeout: 5s
+
+      retries: 10
+
+      start_period: 30s
+
+  spark-master:
+
+    image: bde2020/spark-master:3.3.0-hadoop3.3
+
+    container_name: datax-spark-master
+
+    profiles: [hdfs, spark]
+
+    environment:
+
+      - INIT_DAEMON_STEP=setup_spark
+      - HADOOP_USER_NAME=hdfs
+
+    ports:
+
+      - "8080:8080"
+
+      - "7077:7077"
+
+    depends_on:
+
+      namenode:
+
+        condition: service_healthy
+
+    restart: unless-stopped
+
+  spark-worker:
+
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+
+    container_name: datax-spark-worker
+
+    profiles: [hdfs, spark]
+
+    environment:
+
+      - SPARK_MASTER=spark://spark-master:7077
+      - HADOOP_USER_NAME=hdfs
+
+    depends_on:
+
+      spark-master:
+
+        condition: service_started
+
+    restart: unless-stopped
+
+  spark-gold:
+
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+
+    container_name: datax-spark-gold
+
+    profiles: [hdfs, spark]
+
+    environment:
+
+      - HDFS_BASE_PATH=/datax
+      - HDFS_DEFAULT_FS=hdfs://namenode:8020
+      - HADOOP_USER_NAME=hdfs
+
+    volumes:
+
+      - ./spark:/opt/spark-apps:ro
+
+    depends_on:
+
+      spark-master:
+
+        condition: service_started
+
+      datanode:
+
+        condition: service_started
+
+    command:
+
+      - /spark/bin/spark-submit
+
+      - --master
+
+      - spark://spark-master:7077
+
+      - /opt/spark-apps/jobs/gold_job.py
+
+
+
+  hdfs-init:
+
+    build: .
+
+    image: datax-stock-market:latest
+
+    container_name: datax-hdfs-init
+
+    profiles: [hdfs]
+
+    env_file:
+
+      - path: .env
+
+        required: false
+
+    environment:
+
+      STORAGE_BACKEND: hdfs
+
+      HDFS_NAMENODE: namenode
+
+      HDFS_WEB_PORT: "9870"
+
+      HDFS_PORT: "8020"
+
+      HDFS_USER: hdfs
+
+      HDFS_BASE_PATH: /datax
+
+    volumes:
+
+      - ./lakehouse:/app/lakehouse:ro
+
+      - ./monitoring:/app/monitoring:ro
+
+    command:
+
+      - sh
+
+      - -c
+
+      - |
+
+        python scripts/wait_for_hdfs.py &&
+
+        python scripts/upload_local_to_hdfs.py --source /app
+
+    depends_on:
+
+      datanode:
+
+        condition: service_started
+
+      postgres:
+
+        condition: service_healthy
+
+
+
+  dashboard:
+
+    build: .
+
+    image: datax-stock-market:latest
+
+    container_name: datax-dashboard
+
+    ports:
+
+      - "8502:8502"
+
+    env_file:
+
+      - path: .env
+
+        required: false
+
+    environment:
+
+      STORAGE_BACKEND: local
+
+      LOCAL_STORAGE_ROOT: /app
+
+    volumes:
+
+      - ./lakehouse:/app/lakehouse
+
+      - ./monitoring:/app/monitoring
+
+      - ./Data:/app/Data:ro
+
+    restart: unless-stopped
+
+    healthcheck:
+
+      test:
+
+        [
+
+          "CMD",
+
+          "python",
+
+          "-c",
+
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health')",
+
+        ]
+
+      interval: 30s
+
+      timeout: 10s
+
       retries: 3
+
       start_period: 40s
 
-  pipeline:
+
+
+  finnhub-stream:
+
     build: .
+
     image: datax-stock-market:latest
-    container_name: datax-pipeline
-    profiles:
-      - pipeline
+
+    container_name: datax-finnhub-stream
+
+    profiles: [stream]
+
     env_file:
+
       - path: .env
+
         required: false
+
     environment:
+
       STORAGE_BACKEND: local
+
       LOCAL_STORAGE_ROOT: /app
+
+      FINNHUB_SYMBOL: DIA
+
+      FINNHUB_BUCKET_SEC: "60"
+
     volumes:
+
       - ./lakehouse:/app/lakehouse
-      - ./monitoring:/app/monitoring
+
       - ./Data:/app/Data
+
+    restart: unless-stopped
+
     command:
+
       - python
+
+      - scripts/stream_finnhub_ohlcv.py
+
+      - --ticker
+
+      - DIA
+
+      - --lakehouse
+
+      - --csv
+
+
+
+  finnhub-stream-hdfs:
+
+    build: .
+
+    image: datax-stock-market:latest
+
+    container_name: datax-finnhub-stream-hdfs
+
+    profiles: [hdfs, stream]
+
+    env_file:
+
+      - path: .env
+
+        required: false
+
+    environment:
+
+      STORAGE_BACKEND: hdfs
+
+      HDFS_NAMENODE: namenode
+
+      HDFS_WEB_PORT: "9870"
+
+      HDFS_PORT: "8020"
+
+      HDFS_USER: hdfs
+
+      HDFS_BASE_PATH: /datax
+
+      FINNHUB_SYMBOL: DIA
+
+      FINNHUB_BUCKET_SEC: "60"
+
+    restart: unless-stopped
+
+    command:
+
+      - sh
+
+      - -c
+
+      - |
+
+        python scripts/wait_for_hdfs.py &&
+
+        python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse --csv
+
+    depends_on:
+
+      hdfs-init:
+
+        condition: service_completed_successfully
+
+
+
+  dashboard-hdfs:
+
+    build: .
+
+    image: datax-stock-market:latest
+
+    container_name: datax-dashboard-hdfs
+
+    profiles: [hdfs]
+
+    ports:
+
+      - "8503:8502"
+
+    env_file:
+
+      - path: .env
+
+        required: false
+
+    environment:
+
+      STORAGE_BACKEND: hdfs
+
+      HDFS_NAMENODE: namenode
+
+      HDFS_WEB_PORT: "9870"
+
+      HDFS_PORT: "8020"
+
+      HDFS_USER: hdfs
+
+      HDFS_BASE_PATH: /datax
+
+    restart: unless-stopped
+
+    depends_on:
+
+      hdfs-init:
+
+        condition: service_completed_successfully
+
+      postgres:
+
+        condition: service_healthy
+
+    healthcheck:
+
+      test:
+
+        [
+
+          "CMD",
+
+          "python",
+
+          "-c",
+
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health')",
+
+        ]
+
+      interval: 30s
+
+      timeout: 10s
+
+      retries: 3
+
+      start_period: 40s
+
+
+
+  pipeline:
+
+    build: .
+
+    image: datax-stock-market:latest
+
+    container_name: datax-pipeline
+
+    profiles: [pipeline]
+
+    env_file:
+
+      - path: .env
+
+        required: false
+
+    environment:
+
+      STORAGE_BACKEND: local
+
+      LOCAL_STORAGE_ROOT: /app
+
+    volumes:
+
+      - ./lakehouse:/app/lakehouse
+
+      - ./monitoring:/app/monitoring
+
+      - ./Data:/app/Data
+
+    command:
+
+      - python
+
       - pipeline/run_pipeline.py
+
       - --massive
+
       - --predict-year
+
       - "2026"
 
-  test:
+
+
+  pipeline-hdfs:
+
     build: .
+
     image: datax-stock-market:latest
-    container_name: datax-test
-    profiles:
-      - test
+
+    container_name: datax-pipeline-hdfs
+
+    profiles: [hdfs, pipeline]
+
+    env_file:
+
+      - path: .env
+
+        required: false
+
     environment:
+
+      STORAGE_BACKEND: hdfs
+
+      HDFS_NAMENODE: namenode
+
+      HDFS_WEB_PORT: "9870"
+
+      HDFS_PORT: "8020"
+
+      HDFS_USER: hdfs
+
+      HDFS_BASE_PATH: /datax
+
+    command:
+
+      - sh
+
+      - -c
+
+      - |
+
+        python scripts/wait_for_hdfs.py &&
+
+        python pipeline/run_pipeline.py --massive --predict-year 2026 --gold-engine spark
+
+    depends_on:
+
+      hdfs-init:
+
+        condition: service_completed_successfully
+
+      postgres:
+
+        condition: service_healthy
+
+
+
+  test:
+
+    build: .
+
+    image: datax-stock-market:latest
+
+    container_name: datax-test
+
+    profiles: [test]
+
+    environment:
+
       STORAGE_BACKEND: local
+
       LOCAL_STORAGE_ROOT: /app
+
     volumes:
+
       - ./lakehouse:/app/lakehouse
+
       - ./monitoring:/app/monitoring
+
     command: ["pytest", "tests/", "-v"]
+
+
+
+  airflow-postgres:
+
+    image: postgres:16-alpine
+
+    container_name: datax-airflow-postgres
+
+    profiles: [airflow]
+
+    restart: unless-stopped
+
+    environment:
+
+      POSTGRES_USER: airflow
+
+      POSTGRES_PASSWORD: airflow
+
+      POSTGRES_DB: airflow
+
+    volumes:
+
+      - airflow_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+
+      interval: 10s
+
+      timeout: 5s
+
+      retries: 10
+
+      start_period: 20s
+
+
+
+  airflow-init:
+
+    build:
+
+      context: .
+
+      dockerfile: airflow/Dockerfile
+
+    image: datax-airflow:latest
+
+    container_name: datax-airflow-init
+
+    profiles: [airflow]
+
+    environment:
+
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-dGVzdGZlcm5ldGtleXRlc3Rmb3JkZXZlbG9wbWVudA==}
+
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+
+      AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+
+    volumes:
+
+      - ./dags:/opt/airflow/dags
+
+      - ./logs/airflow:/opt/airflow/logs
+
+      - .:/opt/airflow/project
+
+    command:
+
+      - bash
+
+      - -c
+
+      - |
+
+        airflow db migrate &&
+
+        airflow users create \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD}" \
+          --firstname Admin \
+          --lastname DataX \
+          --role Admin \
+          --email admin@datax.local || true
+
+    depends_on:
+
+      airflow-postgres:
+
+        condition: service_healthy
+
+
+
+  airflow-webserver:
+    image: datax-airflow:latest
+
+    container_name: datax-airflow-webserver
+
+    profiles: [airflow]
+
+    restart: unless-stopped
+
+    ports:
+
+      - "8081:8080"
+
+    environment:
+
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-dGVzdGZlcm5ldGtleXRlc3Rmb3JkZXZlbG9wbWVudA==}
+
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+
+      PYTHONPATH: /opt/airflow/project
+
+      STORAGE_BACKEND: hdfs
+
+      HDFS_NAMENODE: namenode
+
+      HDFS_WEB_PORT: "9870"
+
+      HDFS_PORT: "8020"
+
+      HDFS_USER: hdfs
+
+      HDFS_BASE_PATH: /datax
+
+      PGHOST: postgres
+
+      PGPORT: "5432"
+
+      PGDATABASE: wherehouse
+
+      PGUSER: datax
+
+      PGPASSWORD: 10102026Ha
+
+      GOLD_ENGINE: spark
+
+      PIPELINE_MASSIVE: "true"
+
+      PIPELINE_PREDICT_YEAR: "2026"
+
+      AIRFLOW_DAG_SCHEDULE: "@daily"
+
+    volumes:
+
+      - ./dags:/opt/airflow/dags
+
+      - ./logs/airflow:/opt/airflow/logs
+
+      - .:/opt/airflow/project
+
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    command: webserver
+
+    depends_on:
+
+      airflow-init:
+
+        condition: service_completed_successfully
+
+      namenode:
+
+        condition: service_healthy
+
+      hdfs-init:
+
+        condition: service_completed_successfully
+
+      postgres:
+
+        condition: service_healthy
+
+
+
+  airflow-scheduler:
+    image: datax-airflow:latest
+
+    container_name: datax-airflow-scheduler
+
+    profiles: [airflow]
+
+    restart: unless-stopped
+
+    environment:
+
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-dGVzdGZlcm5ldGtleXRlc3Rmb3JkZXZlbG9wbWVudA==}
+
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+
+      PYTHONPATH: /opt/airflow/project
+
+      STORAGE_BACKEND: hdfs
+
+      HDFS_NAMENODE: namenode
+
+      HDFS_WEB_PORT: "9870"
+
+      HDFS_PORT: "8020"
+
+      HDFS_USER: hdfs
+
+      HDFS_BASE_PATH: /datax
+
+      PGHOST: postgres
+
+      PGPORT: "5432"
+
+      PGDATABASE: wherehouse
+
+      PGUSER: datax
+
+      PGPASSWORD: 10102026Ha
+
+      GOLD_ENGINE: spark
+
+      PIPELINE_MASSIVE: "true"
+
+      PIPELINE_PREDICT_YEAR: "2026"
+
+      AIRFLOW_DAG_SCHEDULE: "@daily"
+
+    volumes:
+
+      - ./dags:/opt/airflow/dags
+
+      - ./logs/airflow:/opt/airflow/logs
+
+      - .:/opt/airflow/project
+
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    command: scheduler
+
+    depends_on:
+
+      airflow-init:
+
+        condition: service_completed_successfully
+
+      namenode:
+
+        condition: service_healthy
+
+      hdfs-init:
+
+        condition: service_completed_successfully
+
+      postgres:
+
+        condition: service_healthy
+
+
+
+volumes:
+
+  hadoop_namenode:
+
+  hadoop_datanode:
+
+  postgres_data:
+
+  airflow_postgres_data:
+

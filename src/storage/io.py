@@ -36,14 +36,17 @@ def hdfs_namenode() -> str:
     return f"hdfs://{host}:{port}"
 
 
+def hdfs_web_url() -> str:
+    from src.storage.hdfs_web import hdfs_web_url as _url
+
+    return _url()
+
+
 def get_fs():
     if is_hdfs():
-        return fsspec.filesystem(
-            "hdfs",
-            host=os.getenv("HDFS_NAMENODE", "localhost"),
-            port=int(os.getenv("HDFS_PORT", "8020")),
-            user=os.getenv("HDFS_USER", "hdfs"),
-        )
+        from src.storage.hdfs_web import WebHdfsFilesystem
+
+        return WebHdfsFilesystem()
     return fsspec.filesystem("file")
 
 
@@ -73,7 +76,8 @@ def ml_file(name: str) -> str:
 
 def storage_label() -> str:
     if is_hdfs():
-        return f"{hdfs_namenode()}{storage_root()}/lakehouse/"
+        base = f"{hdfs_namenode()}{storage_root()}/lakehouse/"
+        return f"{base} (UI: {hdfs_web_url()})"
     return join_path("lakehouse") + ("" if join_path("lakehouse").endswith("/") else "/")
 
 
@@ -123,11 +127,19 @@ def glob_paths(pattern: str) -> list[str]:
 
 
 def read_parquet(path: str) -> pd.DataFrame:
+    # pyarrow/parquet attend un file-like seekable. WebHDFS renvoie un stream non seekable.
+    if is_hdfs():
+        return pd.read_parquet(io.BytesIO(read_bytes(path)))
     with get_fs().open(path, "rb") as handle:
         return pd.read_parquet(handle)
 
 
 def write_parquet(df: pd.DataFrame, path: str) -> str:
+    if is_hdfs():
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False, engine="pyarrow")
+        write_bytes(buffer.getvalue(), path)
+        return path
     makedirs(path)
     with get_fs().open(path, "wb") as handle:
         df.to_parquet(handle, index=False, engine="pyarrow")

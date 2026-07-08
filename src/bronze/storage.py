@@ -58,3 +58,36 @@ def write_bronze(
         payload[key] = value
     write_parquet(payload, path)
     return payload, path
+
+
+def append_bronze_rows(
+    rows: list[dict],
+    table: str,
+    batch_id: str,
+    source_label: str,
+    *,
+    dedupe_on: str = "Date",
+) -> str:
+    """Ajoute des lignes a une table Bronze (merge + dedupe, metadata mises a jour)."""
+    if not rows:
+        path = bronze_parquet(table)
+        return path
+
+    incoming = pd.DataFrame(rows)
+    if dedupe_on in incoming.columns:
+        incoming[dedupe_on] = pd.to_datetime(incoming[dedupe_on])
+
+    path = bronze_parquet(table)
+    if exists(path):
+        existing = strip_metadata(read_parquet(path))
+        if dedupe_on in existing.columns:
+            existing[dedupe_on] = pd.to_datetime(existing[dedupe_on])
+        combined = pd.concat([existing, incoming], ignore_index=True)
+        if dedupe_on in combined.columns:
+            combined = combined.drop_duplicates(subset=[dedupe_on], keep="last")
+        combined = combined.sort_values(dedupe_on).reset_index(drop=True)
+    else:
+        combined = incoming.sort_values(dedupe_on).reset_index(drop=True)
+
+    write_bronze(combined, table, batch_id, source_label)
+    return path
