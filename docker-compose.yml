@@ -1,0 +1,67 @@
+services:
+  dashboard:
+    build: .
+    image: datax-stock-market:latest
+    container_name: datax-dashboard
+    ports:
+      - "8502:8502"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_ROOT: /app
+    volumes:
+      - ./lakehouse:/app/lakehouse
+      - ./monitoring:/app/monitoring
+      - ./Data:/app/Data:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health')",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  pipeline:
+    build: .
+    image: datax-stock-market:latest
+    container_name: datax-pipeline
+    profiles:
+      - pipeline
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_ROOT: /app
+    volumes:
+      - ./lakehouse:/app/lakehouse
+      - ./monitoring:/app/monitoring
+      - ./Data:/app/Data
+    command:
+      - python
+      - pipeline/run_pipeline.py
+      - --massive
+      - --predict-year
+      - "2026"
+
+  test:
+    build: .
+    image: datax-stock-market:latest
+    container_name: datax-test
+    profiles:
+      - test
+    environment:
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_ROOT: /app
+    volumes:
+      - ./lakehouse:/app/lakehouse
+      - ./monitoring:/app/monitoring
+    command: ["pytest", "tests/", "-v"]

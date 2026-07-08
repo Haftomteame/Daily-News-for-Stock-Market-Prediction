@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.git/
+.gitignore
+.env
+*.egg-info/
+
+# Donnees volumineuses — montees en volume au runtime
+Data/*.csv
+Data/massive/
+lakehouse/
+monitoring/

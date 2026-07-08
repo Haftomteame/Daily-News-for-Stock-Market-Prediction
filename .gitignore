@@ -1,0 +1,158 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+pip-log.txt
+
+# Tests et couverture
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+cover/
+
+# Linters / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# =============================================================================
+# Secrets et credentials (ne jamais versionner)
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials.json
+secrets.json
+service-account*.json
+
+# =============================================================================
+# Donnees legacy CSV
+# =============================================================================
+Data/*
+!Data/.gitkeep
+
+# =============================================================================
+# Lakehouse (Bronze / Silver / Gold / ML) — genere par le pipeline
+# =============================================================================
+/lakehouse/
+
+# Artefacts data / ML (hors code source)
+*.parquet
+*.joblib
+*.feather
+*.arrow
+*.duckdb
+*.sqlite
+*.sqlite3
+*.db
+
+# =============================================================================
+# Monitoring — rapports et historique generes (racine projet uniquement)
+# =============================================================================
+/monitoring/
+report_*.json
+metrics_history.parquet
+
+# =============================================================================
+# Streamlit
+# =============================================================================
+.streamlit/secrets.toml
+
+# =============================================================================
+# Docker (fichiers locaux, pas Dockerfile ni docker-compose.yml)
+# =============================================================================
+docker-data/
+docker-compose.override.yml
+.docker/
+
+# =============================================================================
+# IDE / editeurs
+# =============================================================================
+.vscode/
+.idea/
+.cursor/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Logs, caches et temporaires
+# =============================================================================
+*.log
+*.tmp
+*.temp
+*.bak
+*.cache
+.cache/
+tmp/
+temp/
+logs/
+
+# =============================================================================
+# Jupyter (si notebooks ajoutes plus tard)
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# =============================================================================
+# Node (si front ajoute plus tard)
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
