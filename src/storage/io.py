@@ -137,12 +137,24 @@ def read_parquet(path: str) -> pd.DataFrame:
 def write_parquet(df: pd.DataFrame, path: str) -> str:
     if is_hdfs():
         buffer = io.BytesIO()
-        df.to_parquet(buffer, index=False, engine="pyarrow")
+        df.to_parquet(
+            buffer,
+            index=False,
+            engine="pyarrow",
+            coerce_timestamps="us",
+            allow_truncated_timestamps=True,
+        )
         write_bytes(buffer.getvalue(), path)
         return path
     makedirs(path)
     with get_fs().open(path, "wb") as handle:
-        df.to_parquet(handle, index=False, engine="pyarrow")
+        df.to_parquet(
+            handle,
+            index=False,
+            engine="pyarrow",
+            coerce_timestamps="us",
+            allow_truncated_timestamps=True,
+        )
     return path
 
 

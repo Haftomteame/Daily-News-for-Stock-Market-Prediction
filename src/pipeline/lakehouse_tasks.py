@@ -131,18 +131,49 @@ def run_gold_python(ctx: PipelineContext) -> dict[str, Any]:
     return {"table": result["table"], "rows": result["rows"], "path": result["path"]}
 
 
-def run_gold_spark(ctx: PipelineContext) -> dict[str, Any]:
-    """Agregation Gold via job Spark (container spark-gold ou fallback Python)."""
+def _docker_compose_available(docker_bin: str) -> bool:
+    import subprocess
+
+    proc = subprocess.run(
+        [docker_bin, "compose", "version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _docker_network() -> str | None:
     import os
-    import shutil
+    import subprocess
+
+    for container in ("datax-spark-master", "datax-namenode"):
+        proc = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                container,
+                "--format",
+                "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    return os.getenv("DOCKER_NETWORK")
+
+
+def _run_docker_spark_gold(project_root, docker_bin: str) -> None:
     import subprocess
     from pathlib import Path
 
-    project_root = Path(__file__).resolve().parent.parent.parent
+    project_root = Path(project_root)
     compose_file = project_root / "docker-compose.yml"
-    docker_bin = shutil.which("docker")
+    errors: list[str] = []
 
-    if docker_bin and compose_file.exists():
+    if _docker_compose_available(docker_bin):
         cmd = [
             docker_bin,
             "compose",
@@ -156,16 +187,75 @@ def run_gold_spark(ctx: PipelineContext) -> dict[str, Any]:
             "--rm",
             "spark-gold",
         ]
-        subprocess.run(cmd, check=True, cwd=project_root)
+        proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+        if proc.returncode == 0:
+            if proc.stdout:
+                print(proc.stdout)
+            return
+        errors.append(proc.stderr or proc.stdout or f"exit {proc.returncode}")
+
+    network = _docker_network()
+    if not network:
+        raise RuntimeError(
+            "Reseau Docker introuvable. Demarrez spark-master ou definissez DOCKER_NETWORK."
+        )
+
+    spark_dir = project_root / "spark"
+    cmd = [
+        docker_bin,
+        "run",
+        "--rm",
+        "--network",
+        network,
+        "-e",
+        "HDFS_BASE_PATH=/datax",
+        "-e",
+        "HDFS_DEFAULT_FS=hdfs://namenode:8020",
+        "-e",
+        "HADOOP_USER_NAME=hdfs",
+        "-v",
+        f"{spark_dir}:/opt/spark-apps:ro",
+        "bde2020/spark-worker:3.3.0-hadoop3.3",
+        "/spark/bin/spark-submit",
+        "--master",
+        "spark://spark-master:7077",
+        "/opt/spark-apps/jobs/gold_job.py",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        if proc.stdout:
+            print(proc.stdout)
+        return
+
+    errors.append(proc.stderr or proc.stdout or f"exit {proc.returncode}")
+    raise RuntimeError("Echec Spark Gold via Docker:\n" + "\n".join(errors))
+
+
+def run_gold_spark(ctx: PipelineContext) -> dict[str, Any]:
+    """Agregation Gold via job Spark (container spark-gold ou fallback Python)."""
+    import os
+    import shutil
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    docker_bin = shutil.which("docker")
+
+    if docker_bin and (project_root / "docker-compose.yml").exists():
+        try:
+            _run_docker_spark_gold(project_root, docker_bin)
+        except RuntimeError as exc:
+            print(f"WARN : {exc}")
+            if os.getenv("AIRFLOW_HOME"):
+                print("WARN : fallback Gold Python (DuckDB) depuis Airflow.")
+                return run_gold_python(ctx)
+            raise
         t0 = time.perf_counter() - 0.001
         ctx.monitor.measure_layer("gold", "daily_market_kpis", gold_data_path(), t0)
         return {"engine": "spark", "path": gold_data_path()}
 
     if os.getenv("AIRFLOW_HOME"):
-        raise RuntimeError(
-            "Spark Gold requiert le socket Docker monte dans Airflow "
-            "(/var/run/docker.sock) et les profils hdfs+spark actifs."
-        )
+        print("WARN : Docker indisponible dans Airflow — fallback Gold Python (DuckDB).")
+        return run_gold_python(ctx)
 
     print("WARN : Docker indisponible — fallback Gold Python (DuckDB).")
     return run_gold_python(ctx)

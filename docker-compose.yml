@@ -158,8 +158,6 @@ services:
 
     image: bde2020/spark-worker:3.3.0-hadoop3.3
 
-    container_name: datax-spark-gold
-
     profiles: [hdfs, spark]
 
     environment:
