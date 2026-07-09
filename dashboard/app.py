@@ -165,6 +165,11 @@ FEATURE_LABELS = {
 # ---------------------------------------------------------------------------
 
 
+def _show_altair(chart: alt.Chart) -> None:
+    """Affiche un graphique Altair (Vega-Lite v5) dans Streamlit."""
+    st.altair_chart(chart, width="stretch", theme=None)
+
+
 def _parse_date(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
@@ -314,8 +319,10 @@ def load_sentiment_distribution() -> pd.DataFrame:
     counts = df["News"].apply(_classify_headline).value_counts().reset_index()
     counts.columns = ["sentiment", "count"]
     order = ["Positif", "Neutre", "Négatif"]
-    counts["sentiment"] = pd.Categorical(counts["sentiment"], categories=order, ordered=True)
-    return counts.sort_values("sentiment")
+    counts["sentiment"] = pd.Categorical(
+        counts["sentiment"].astype(str), categories=order, ordered=True
+    )
+    return counts.sort_values("sentiment").reset_index(drop=True)
 
 
 @st.cache_data(ttl=300)
@@ -398,7 +405,7 @@ def load_data_overview() -> list[dict]:
                 """,
             ).iloc[0]
             rows.append({
-                "source": "Cours Dow Jones (historique complet)",
+                "source": "Dow Jones (historique complet)",
                 "debut": pd.to_datetime(r["dmin"]),
                 "fin": pd.to_datetime(r["dmax"]),
                 "volume": int(r["n"]),
@@ -408,7 +415,7 @@ def load_data_overview() -> list[dict]:
             pass
 
     _lakehouse_row(
-        "Cours Dow Jones (analyse actuelle)",
+        "Dow Jones (données récentes)",
         bronze_data_path("stock_prices"),
         "Date",
         "jours de bourse",
@@ -420,7 +427,7 @@ def load_data_overview() -> list[dict]:
         "messages",
     )
     _lakehouse_row(
-        "Jours analysés (cours + Reddit)",
+        "Jours analysés (Dow Jones + Reddit)",
         gold_data_path(),
         "date",
         "jours de bourse",
@@ -442,7 +449,7 @@ def render_warehouse_stats(stats: pd.DataFrame, category_filter: str | None = No
     st.markdown("#### Données financières structurées")
     if stats.empty:
         st.info(
-            "Les données financières (cours, options, taux, résultats) "
+            "Les données financières (prix, options, taux, résultats) "
             "ne sont pas encore disponibles dans la base."
         )
         return
@@ -480,9 +487,8 @@ def render_warehouse_stats(stats: pd.DataFrame, category_filter: str | None = No
                 ],
             )
             .properties(height=280, title="Répartition par catégorie")
-            .interactive()
         )
-        st.altair_chart(donut, use_container_width=True)
+        _show_altair(donut)
 
     with col_cards:
         n = len(schema_totals)
@@ -517,21 +523,23 @@ def render_warehouse_stats(stats: pd.DataFrame, category_filter: str | None = No
     )
     bar = (
         alt.Chart(detail)
-        .mark_bar(cornerRadiusEnd=4, color="#818cf8")
+        .mark_bar(color="#818cf8")
         .encode(
-            y=alt.Y("Contenu:N", sort="-x", title=""),
-            x=alt.X("Volume:Q", title="Enregistrements"),
-            color=alt.Color("Catégorie:N", legend=None),
+            y=alt.Y(
+                "Contenu:N",
+                sort=alt.EncodingSortField(field="Volume", order="descending"),
+                title="",
+            ),
+            x=alt.X("Volume:Q", title="Enregistrements", axis=alt.Axis(format=",d")),
             tooltip=[
                 alt.Tooltip("Catégorie:N", title="Catégorie"),
                 alt.Tooltip("Contenu:N", title="Contenu"),
                 alt.Tooltip("Volume:Q", title="Volume", format=","),
             ],
         )
-        .properties(height=max(220, len(detail) * 22), title="Détail par jeu de données")
-        .interactive()
+        .properties(height=max(280, len(detail) * 28), title="Détail par jeu de données")
     )
-    st.altair_chart(bar, use_container_width=True)
+    _show_altair(bar)
 
 
 def _fmt_period_fr(debut: pd.Timestamp, fin: pd.Timestamp) -> str:
@@ -551,6 +559,18 @@ def _years_span(debut: pd.Timestamp, fin: pd.Timestamp) -> str:
 def _pick(df: pd.DataFrame, name: str) -> float:
     match = df[df["feature"] == name]
     return float(match["importance"].iloc[0]) if not match.empty else 0.0
+
+
+SOURCE_CHART_LABELS = {
+    "Dow Jones (historique complet)": "Dow Jones — historique",
+    "Dow Jones (données récentes)": "Dow Jones — récent",
+    "Messages Reddit": "Messages Reddit",
+    "Jours analysés (Dow Jones + Reddit)": "Jours croisés",
+}
+
+
+def _overview_chart_label(source: str) -> str:
+    return SOURCE_CHART_LABELS.get(source, source)
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +634,7 @@ def render_pipeline_flow(report: dict | None, ml_ok: bool) -> None:
 
         src1, src2 = st.columns(2)
         with src1:
-            st.markdown(_flow_node("📈", "Cours de bourse", "Historique Dow Jones", bronze_ok), unsafe_allow_html=True)
+            st.markdown(_flow_node("📈", "Dow Jones", "Prix historiques", bronze_ok), unsafe_allow_html=True)
         with src2:
             st.markdown(_flow_node("💬", "Reddit", "Titres et discussions", bronze_ok), unsafe_allow_html=True)
 
@@ -667,9 +687,9 @@ def render_kpi_cards(
     combined_value = f"{combined_row['volume']:,}".replace(",", " ") if combined_row else "—"
 
     cards = [
-        ("Historique", "badge-temps", "📅", hist_value, "de cours Dow Jones", "depuis 2011"),
+        ("Historique", "badge-temps", "📅", hist_value, "du Dow Jones", "depuis 2011"),
         ("Réseaux sociaux", "badge-social", "💬", reddit_value, "messages Reddit", "depuis 2023"),
-        ("Analyse", "badge-volume", "🗄️", combined_value, "jours croisés", "cours + Reddit"),
+        ("Analyse", "badge-volume", "🗄️", combined_value, "jours croisés", "Dow Jones + Reddit"),
         ("Fiabilité", "badge-ml", "✅", f"{accuracy:.0%}", "de prévisions", "correctes sur 2026"),
     ]
 
@@ -703,30 +723,48 @@ def render_kpi_cards(
         filtered = [r for r in overview if r["source"] in selected]
         vol_df = pd.DataFrame([
             {
-                "Source": row["source"],
-                "Volume": row["volume"],
+                "Source": _overview_chart_label(row["source"]),
+                "Volume": int(row["volume"]),
                 "unité": row["unite"],
             }
             for row in filtered
+            if int(row.get("volume") or 0) > 0
         ])
-        if not vol_df.empty:
-            vol_chart = (
-                alt.Chart(vol_df)
-                .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
-                .encode(
-                    x=alt.X("Source:N", sort="-y", title="", axis=alt.Axis(labelAngle=-25)),
-                    y=alt.Y("Volume:Q", title="Volume"),
-                    color=alt.Color("Source:N", legend=None, scale=alt.Scale(scheme="category10")),
-                    tooltip=[
-                        alt.Tooltip("Source:N", title="Source"),
-                        alt.Tooltip("Volume:Q", title="Volume", format=","),
-                        alt.Tooltip("unité:N", title="Unité"),
-                    ],
+        if vol_df.empty:
+            st.info("Aucun volume à afficher pour les sources sélectionnées.")
+        else:
+            units = vol_df["unité"].unique().tolist()
+            if len(units) > 1:
+                st.caption(
+                    "Les sources n'utilisent pas la même unité "
+                    f"({', '.join(units)}) : chaque groupe est affiché séparément."
                 )
-                .properties(height=280)
-                .interactive()
-            )
-            st.altair_chart(vol_chart, use_container_width=True)
+            for unit in units:
+                unit_df = vol_df[vol_df["unité"] == unit].copy()
+                vol_chart = (
+                    alt.Chart(unit_df)
+                    .mark_bar(color="#6366f1")
+                    .encode(
+                        y=alt.Y(
+                            "Source:N",
+                            sort=alt.EncodingSortField(field="Volume", order="descending"),
+                            title="",
+                        ),
+                        x=alt.X(
+                            "Volume:Q",
+                            title=f"Volume ({unit})",
+                            axis=alt.Axis(format=",d"),
+                            scale=alt.Scale(domain=[0, unit_df["Volume"].max() * 1.08]),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Source:N", title="Source"),
+                            alt.Tooltip("Volume:Q", title="Volume", format=","),
+                            alt.Tooltip("unité:N", title="Unité"),
+                        ],
+                    )
+                    .properties(height=max(160, len(unit_df) * 52))
+                )
+                _show_altair(vol_chart)
 
         with st.expander("Voir le tableau détaillé", expanded=False):
             table = pd.DataFrame([
@@ -812,7 +850,7 @@ def render_sentiment_vs_djia(gold: pd.DataFrame, date_range: tuple | None = None
         .add_params(brush)
         .properties(height=360)
     )
-    st.altair_chart(chart, use_container_width=True)
+    _show_altair(chart)
 
 
 def render_bottom_charts(sentiment_dist: pd.DataFrame, features: pd.DataFrame) -> None:
@@ -836,9 +874,11 @@ def render_bottom_charts(sentiment_dist: pd.DataFrame, features: pd.DataFrame) -
             st.info("Les données Reddit ne sont pas encore disponibles.")
         else:
             colors = {"Positif": "#22c55e", "Neutre": "#9ca3af", "Négatif": "#ef4444"}
+            chart_df = sentiment_dist.copy()
+            chart_df["sentiment"] = chart_df["sentiment"].astype(str)
             chart = (
-                alt.Chart(sentiment_dist)
-                .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+                alt.Chart(chart_df)
+                .mark_bar()
                 .encode(
                     x=alt.X("sentiment:N", title="", sort=["Positif", "Neutre", "Négatif"]),
                     y=alt.Y("count:Q", title="Nombre de titres"),
@@ -856,9 +896,8 @@ def render_bottom_charts(sentiment_dist: pd.DataFrame, features: pd.DataFrame) -
                     ],
                 )
                 .properties(height=280)
-                .interactive()
             )
-            st.altair_chart(chart, use_container_width=True)
+            _show_altair(chart)
 
     with col2:
         st.markdown(
@@ -885,7 +924,7 @@ def render_bottom_charts(sentiment_dist: pd.DataFrame, features: pd.DataFrame) -
 
             influence_chart = (
                 alt.Chart(chart_df)
-                .mark_bar(cornerRadiusEnd=4, color="#fdba74")
+                .mark_bar(color="#fdba74")
                 .encode(
                     y=alt.Y(
                         "feature:N",
@@ -900,7 +939,7 @@ def render_bottom_charts(sentiment_dist: pd.DataFrame, features: pd.DataFrame) -
                 )
                 .properties(height=260)
             )
-            st.altair_chart(influence_chart, use_container_width=True)
+            _show_altair(influence_chart)
 
 
 def render_ml_summary(ml_metrics: dict | None, predictions: pd.DataFrame) -> None:
@@ -969,7 +1008,7 @@ def render_ml_summary(ml_metrics: dict | None, predictions: pd.DataFrame) -> Non
                 .mark_rule(color="#ef4444", strokeDash=[6, 4])
                 .encode(y="y:Q")
             )
-            st.altair_chart(pred_chart + rule, use_container_width=True)
+            _show_altair(pred_chart + rule)
 
         with col_b:
             signal_counts = pred_view["signal"].value_counts().reset_index()
@@ -984,7 +1023,7 @@ def render_ml_summary(ml_metrics: dict | None, predictions: pd.DataFrame) -> Non
                 )
                 .properties(height=280, title=f"Signaux (seuil {threshold}%)")
             )
-            st.altair_chart(pie, use_container_width=True)
+            _show_altair(pie)
 
 
 # ---------------------------------------------------------------------------

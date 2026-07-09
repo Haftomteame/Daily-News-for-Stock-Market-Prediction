@@ -111,7 +111,7 @@ def schema_table_counts(schema: str, *, eng: Engine | None = None) -> dict[str, 
 DOLT_WAREHOUSE_SCHEMAS = ("stocks", "options", "rates", "earnings")
 
 DOLT_SCHEMA_LABELS = {
-    "stocks": "Marché boursier",
+    "stocks": "Actions",
     "options": "Options",
     "rates": "Taux d'intérêt",
     "earnings": "Résultats d'entreprises",
@@ -125,7 +125,7 @@ DOLT_SCHEMA_DESCRIPTIONS = {
 }
 
 DOLT_TABLE_LABELS = {
-    "ohlcv": "Cours boursiers (ouverture, clôture, volume…)",
+    "ohlcv": "Prix des actions (ouverture, clôture, volume…)",
     "symbol": "Liste des symboles",
     "dividend": "Dividendes versés",
     "split": "Fractionnements d'actions",
