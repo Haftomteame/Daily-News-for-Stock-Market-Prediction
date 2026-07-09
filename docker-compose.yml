@@ -282,11 +282,25 @@ services:
 
       LOCAL_STORAGE_ROOT: /app
 
+      PGHOST: postgres
+
+      PGPORT: "5432"
+
+      PGDATABASE: wherehouse
+
+      PGUSER: datax
+
+      PGPASSWORD: 10102026Ha
+
     volumes:
 
       - ./lakehouse:/app/lakehouse
 
       - ./monitoring:/app/monitoring
+
+      - ./dashboard:/app/dashboard
+
+      - ./src:/app/src
 
     restart: unless-stopped
 
@@ -459,6 +473,26 @@ services:
       HDFS_USER: hdfs
 
       HDFS_BASE_PATH: /datax
+
+      PGHOST: postgres
+
+      PGPORT: "5432"
+
+      PGDATABASE: wherehouse
+
+      PGUSER: datax
+
+      PGPASSWORD: 10102026Ha
+
+    volumes:
+
+      - ./lakehouse:/app/lakehouse
+
+      - ./monitoring:/app/monitoring
+
+      - ./dashboard:/app/dashboard
+
+      - ./src:/app/src
 
     restart: unless-stopped
 

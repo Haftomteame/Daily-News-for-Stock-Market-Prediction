@@ -178,7 +178,7 @@ def infer_date_range_from_news() -> tuple[date, date]:
         legacy = next((p for p in legacy_candidates if p.exists()), None)
         if legacy is None:
             raise FileNotFoundError(
-                "Bronze news_reddit absent. Executez --refresh-bronze ou migrate_to_lakehouse.py"
+                "Bronze news_reddit absent. Executez --refresh-bronze ou scripts/fetch_reddit_news.py"
             )
         news = pd.read_csv(legacy)
 

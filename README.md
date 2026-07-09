@@ -17,8 +17,6 @@ lakehouse/                     ← Source de verite (Parquet)
 └── ml/                        ← Modele + predictions + metrics
 
 monitoring/                    ← Rapports JSON (cout, latence, qualite)
-
-Data/                          ← Legacy CSV (migration ponctuelle uniquement)
 ```
 
 ## Types de donnees
@@ -299,9 +297,6 @@ hdfs://namenode:8020/datax/monitoring/metrics_history.parquet
 ## Execution
 
 ```bash
-# Migration ponctuelle CSV legacy -> lakehouse (si vous avez deja Data/*.csv)
-python scripts/migrate_to_lakehouse.py
-
 # Pipeline complet (lit lakehouse/bronze/ existant)
 python pipeline/run_pipeline.py --massive --predict-year 2026
 

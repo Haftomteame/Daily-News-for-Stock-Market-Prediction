@@ -134,7 +134,7 @@ def ingest_news_combined(batch_id: str | None = None) -> tuple[pd.DataFrame, str
     if not bronze_exists("stock_prices") or not bronze_exists("news_reddit"):
         raise FileNotFoundError(
             "Bronze stock_prices et news_reddit requis. "
-            "Executez --refresh-bronze ou scripts/migrate_to_lakehouse.py"
+            "Executez --refresh-bronze ou scripts/fetch_reddit_news.py + scripts/fetch_massive_rest.py"
         )
 
     stock = read_bronze_data("stock_prices")
