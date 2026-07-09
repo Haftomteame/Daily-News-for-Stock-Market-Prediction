@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -78,6 +79,20 @@ def load_predictions(_predictions_mtime: float) -> pd.DataFrame:
 
 
 @st.cache_data
+def load_stock_daily(_bronze_mtime: float) -> pd.DataFrame:
+    path = bronze_data_path("stock_prices")
+    if not exists(path):
+        return pd.DataFrame()
+    df = read_parquet(path)
+    for col in ("_ingestion_ts", "_source_file", "_batch_id", "_layer"):
+        if col in df.columns:
+            df = df.drop(columns=col)
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"])
+    return df.sort_values("Date", ascending=False)
+
+
+@st.cache_data
 def load_stock_1m(_bronze_mtime: float) -> pd.DataFrame:
     path = bronze_data_path("stock_prices_1m")
     if not exists(path):
@@ -106,6 +121,7 @@ with st.sidebar:
         st.markdown(f"[Ouvrir Airflow]({airflow_url})")
 
 gold = load_gold(modified_time(gold_data_path()))
+stock_daily = load_stock_daily(modified_time(bronze_data_path("stock_prices")))
 stock_1m = load_stock_1m(modified_time(bronze_data_path("stock_prices_1m")))
 monitoring = load_monitoring_history(modified_time(MONITORING_HISTORY_PATH))
 ml_metrics = load_ml_metrics(modified_time(ML_METRICS_PATH))
@@ -124,8 +140,8 @@ if is_hdfs():
     base = os.getenv("HDFS_BASE_PATH", "/datax")
     st.sidebar.caption(f"Explorer : {hdfs_web_url()}/explorer.html#/{base.strip('/')}/lakehouse")
 
-tab_overview, tab_realtime, tab_gold, tab_monitoring, tab_ml = st.tabs(
-    ["Vue d'ensemble", "Temps reel", "Couche Gold", "Monitoring", "ML"]
+tab_overview, tab_market, tab_gold, tab_monitoring, tab_ml = st.tabs(
+    ["Vue d'ensemble", "Marche DIA", "Couche Gold", "Monitoring", "ML"]
 )
 
 with tab_overview:
@@ -146,35 +162,48 @@ with tab_overview:
     """)
 
     if gold.empty:
-        st.warning("Pipeline non execute. Lancez : `python pipeline/run_pipeline.py`")
+        st.warning("Données Gold indisponibles. Lancez le pipeline pour initialiser l'historique.")
 
-with tab_realtime:
-    st.subheader("DIA — bougies 1 min (Finnhub WebSocket)")
-    st.caption(
-        "Source : `lakehouse/bronze/stock_prices_1m/` — "
-        "lancez `docker compose --profile stream up -d finnhub-stream` ou le script local."
-    )
-    if stock_1m.empty:
-        st.info(
-            "Aucune donnee temps reel. Ajoutez FINNHUB_TOKEN dans .env puis demarrez le stream."
-        )
+with tab_market:
+    st.subheader("Historique journalier (DJIA)")
+    if stock_daily.empty:
+        st.info("Aucune donnée journalière pour le moment.")
     else:
-        latest = stock_1m.iloc[0]
+        latest = stock_daily.iloc[0]
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Dernier close", f"{latest.get('Close', 0):.2f}")
-        c2.metric("Volume (1 min)", f"{int(latest.get('Volume', 0)):,}")
-        c3.metric("Bougies", len(stock_1m))
+        c2.metric("Volume (jour)", f"{int(latest.get('Volume', 0)):,}")
+        c3.metric("Jours historiques", len(stock_daily))
         c4.metric(
-            "Derniere bougie",
-            pd.to_datetime(latest["Date"]).strftime("%Y-%m-%d %H:%M") if "Date" in latest else "N/A",
+            "Derniere journee",
+            pd.to_datetime(latest["Date"]).strftime("%Y-%m-%d") if "Date" in latest else "N/A",
         )
-
-        chart_df = stock_1m.sort_values("Date").set_index("Date")
+        chart_df = stock_daily.sort_values("Date").set_index("Date")
         st.line_chart(chart_df["Close"].tail(120))
-        st.dataframe(
-            stock_1m.head(30),
-            use_container_width=True,
+        with st.expander("Voir les donnees journalieres"):
+            st.dataframe(stock_daily.head(30), use_container_width=True)
+
+    st.divider()
+    st.subheader("Temps réel — bougies 1 min")
+    st_autorefresh(interval=10_000, limit=None, key="rt_market_autorefresh")
+    if stock_1m.empty:
+        st.info("En attente des bougies en temps réel. Lancez le flux.")
+    else:
+        latest_rt = stock_1m.iloc[0]
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Dernier close (1 min)", f"{latest_rt.get('Close', 0):.2f}")
+        r2.metric("Volume (1 min)", f"{int(latest_rt.get('Volume', 0)):,}")
+        r3.metric("Bougies temps reel", len(stock_1m))
+        r4.metric(
+            "Derniere bougie",
+            pd.to_datetime(latest_rt["Date"]).strftime("%Y-%m-%d %H:%M")
+            if "Date" in latest_rt
+            else "N/A",
         )
+        rt_chart = stock_1m.sort_values("Date").set_index("Date")
+        st.line_chart(rt_chart["Close"].tail(120))
+        with st.expander("Voir les bougies 1 min"):
+            st.dataframe(stock_1m.head(30), use_container_width=True)
 
 with tab_gold:
     if gold.empty:

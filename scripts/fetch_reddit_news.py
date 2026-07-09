@@ -16,7 +16,8 @@ from src.bronze.reddit_fetch import (  # noqa: E402
     fetch_range_arctic,
     fetch_recent_praw,
 )
-from src.config import bronze_data_path, write_bronze  # noqa: E402
+from src.bronze.storage import write_bronze  # noqa: E402
+from src.config import bronze_data_path  # noqa: E402
 from src.env import load_dotenv  # noqa: E402
 
 
@@ -29,8 +30,8 @@ def main() -> None:
     parser.add_argument("--to", dest="date_to", help="YYYY-MM-DD (requis sauf --praw)")
     parser.add_argument(
         "--subreddit",
-        default="worldnews",
-        help="Subreddit(s) separes par virgule (defaut: worldnews)",
+        default="stocks,wallstreetbets,StockMarket,investing",
+        help="Subreddit(s) separes par virgule (defaut: stocks,wallstreetbets,StockMarket,investing)",
     )
     parser.add_argument(
         "--max-per-day",

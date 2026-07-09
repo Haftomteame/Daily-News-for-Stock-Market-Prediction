@@ -48,7 +48,7 @@ def _fetch_news_reddit(start: date, end: date) -> pd.DataFrame:
     from src.bronze.reddit_fetch import RedditFetchError, fetch_range_arctic
 
     try:
-        return fetch_range_arctic(start, end, subreddits=["worldnews"])
+        return fetch_range_arctic(start, end, subreddits=["stocks", "wallstreetbets", "investing"])
     except RedditFetchError as exc:
         raise FileNotFoundError(f"Fetch Reddit impossible : {exc}") from exc
 

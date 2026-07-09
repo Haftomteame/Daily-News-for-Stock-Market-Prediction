@@ -94,6 +94,37 @@ Les donnees **structurees** (Silver/Gold) sont aussi chargees dans PostgreSQL (m
 
 Vous pouvez vous connecter avec **DBeaver / pgAdmin / PowerBI**.
 
+### Import Dolt → PostgreSQL (4 depots)
+
+Depots supportes (un schema PostgreSQL par depot) :
+
+| Clone Dolt | Dossier | Schema PG |
+|------------|---------|-----------|
+| `haftomt/stocks` | `stocks/` | `stocks` |
+| `post-no-preference/options` | `options/` | `options` |
+| `post-no-preference/rates` | `rates/` | `rates` |
+| `post-no-preference/earnings` | `earnings/` | `earnings` |
+
+Dans **ubuntu-box** (apres `dolt clone` dans `/data`) :
+
+```bash
+# Demarrer PostgreSQL
+docker compose --profile hdfs up -d postgres ubuntu
+
+# Cloner les depots (une fois)
+cd /data
+dolt clone haftomt/stocks
+dolt clone post-no-preference/options
+dolt clone post-no-preference/rates
+dolt clone post-no-preference/earnings
+
+# Verifier puis importer les 4 depots
+python3 /app/scripts/dolt_to_postgres.py --dry-run
+python3 /app/scripts/dolt_to_postgres.py
+```
+
+Options utiles : `--repos stocks options`, `--tables ma_table`, `--dolt-root /chemin/vers/clones`.
+
 ## Docker + HDFS (voir le cluster)
 
 Le code HDFS existait mais **aucun service Hadoop** n'etait demarre. Utilisez le profil `hdfs` :
@@ -124,7 +155,9 @@ Mode local (sans HDFS) : `docker compose up dashboard` → http://localhost:8502
 
 ## Streaming temps reel (Finnhub — DIA 1 min)
 
-Flux WebSocket Finnhub → bougies OHLCV 1 minute → `lakehouse/bronze/stock_prices_1m/`.
+Flux WebSocket Finnhub → bougies OHLCV **1 minute** → `lakehouse/bronze/stock_prices_1m/`.
+
+Les donnees journalieres historiques (`lakehouse/bronze/stock_prices/`, Massive) **ne sont pas modifiees** : le stream ajoute uniquement dans `stock_prices_1m`.
 
 ### Prerequis
 
@@ -132,18 +165,20 @@ Flux WebSocket Finnhub → bougies OHLCV 1 minute → `lakehouse/bronze/stock_pr
 ```env
 FINNHUB_TOKEN=votre_cle
 FINNHUB_SYMBOL=DIA
+FINNHUB_BUCKET_MODE=minute
 ```
 
 2. Marche US ouvert (les bougies n'apparaissent que lorsqu'il y a des trades).
 
+> Mode journalier (optionnel, met a jour le jour en cours dans `stock_prices`) : `FINNHUB_BUCKET_MODE=day`
+
 ### Lancer en local
 
 ```bash
-python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse --csv
+python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse
 ```
 
-- **Lakehouse** : `lakehouse/bronze/stock_prices_1m/data.parquet` (mis a jour en continu)
-- **CSV** (option `--csv`) : `Data/finnhub_dia_1m.csv`
+- **Lakehouse temps reel** : `lakehouse/bronze/stock_prices_1m/data.parquet` (ajout incremental)
 
 ### Lancer avec Docker (service long-running)
 
@@ -152,7 +187,7 @@ python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse --csv
 docker compose --profile stream up -d --build finnhub-stream
 
 # HDFS
-docker compose --profile hdfs --profile stream up -d --build finnhub-stream-hdfs
+docker compose --profile hdfs up -d --build finnhub-stream-hdfs
 
 # Logs
 docker compose logs -f finnhub-stream
@@ -161,7 +196,7 @@ docker compose logs -f finnhub-stream
 docker compose --profile stream down
 ```
 
-Le dashboard affiche les dernieres bougies 1 min dans l'onglet **Temps reel** (rafraichir pour mettre a jour).
+Le dashboard affiche historique journalier + temps reel 1 min dans l'onglet **Marche DIA**.
 
 **Note** : le plan gratuit Finnhub peut imposer un delai (~15 min) sur les donnees US.
 
@@ -281,15 +316,11 @@ python scripts/fetch_massive_rest.py --from 2024-07-08 --to 2026-07-06
 
 # Stream temps reel Finnhub (DIA, bougies 1 min -> lakehouse/bronze/stock_prices_1m/)
 # FINNHUB_TOKEN dans .env ; marche US ouverte recommande
-python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse --csv
+python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse
 
 # Ou via Docker (service long-running)
 docker compose --profile stream up -d finnhub-stream
 python scripts/fetch_reddit_news.py --from 2024-07-08 --to 2026-07-06
-python scripts/build_combined_news.py
-
-# Explorer les KPIs Gold (schema fixe)
-python scripts/explore_gold.py
 
 # Dashboard interactif (port 8502 par defaut)
 python scripts/run_dashboard.py
@@ -320,7 +351,6 @@ src/
 dags/stock_market_lakehouse_dag.py  ← DAG Airflow
 pipeline/run_pipeline.py   ← Orchestrateur monolithique (inclut ML)
 scripts/pipeline_task.py   ← Une tache pipeline en CLI
-scripts/explore_gold.py    ← Exploration couche Gold
 dashboard/app.py           ← Dashboard Streamlit
 tests/                     ← Tests pytest
 src/ml/train.py            ← Entrainement ML (Combined_News_DJIA)

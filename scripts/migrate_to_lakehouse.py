@@ -43,15 +43,18 @@ def main() -> int:
     data_dir = args.data_dir
 
     stock_candidates = [
-        data_dir / "upload_DJIA_table.csv",
         data_dir / "upload_DJIA_2024_2026.csv",
         data_dir / "massive_rest.csv",
+        data_dir / "upload_DJIA_table.csv",
     ]
     reddit_candidates = [
-        data_dir / "RedditNews.csv",
         data_dir / "RedditNews_2024_2026.csv",
+        data_dir / "RedditNews.csv",
     ]
-    combined_candidates = [data_dir / "Combined_News_DJIA.csv", data_dir / "Combined_News_DJIA_2024_2026.csv"]
+    combined_candidates = [
+        data_dir / "Combined_News_DJIA_2024_2026.csv",
+        data_dir / "Combined_News_DJIA.csv",
+    ]
 
     stock_path = next((p for p in stock_candidates if p.exists()), None)
     reddit_path = next((p for p in reddit_candidates if p.exists()), None)

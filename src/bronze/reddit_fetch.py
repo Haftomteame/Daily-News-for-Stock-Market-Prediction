@@ -9,7 +9,8 @@ import pandas as pd
 import requests
 
 ARCTIC_SHIFT_API = "https://arctic-shift.photon-reddit.com/api/posts/search"
-DEFAULT_SUBREDDITS = ("worldnews", "news")
+# Subreddits cibles du projet (peuvent etre surcharges par le script/CLI).
+DEFAULT_SUBREDDITS = ("stocks", "wallstreetbets", "StockMarket", "investing")
 MAX_RETRIES = 5
 
 
@@ -169,6 +170,10 @@ def fetch_range_arctic(
 
     df = pd.DataFrame(all_rows)
     df = df.drop_duplicates(subset=["Date", "News"]).sort_values(["Date", "News"])
+    # Conserver le subreddit aide pour l'EDA / analyse, et ne casse pas build_combined
+    # (qui utilise seulement Date/News).
+    if "subreddit" in df.columns:
+        return df[["Date", "News", "subreddit"]]
     return df[["Date", "News"]]
 
 

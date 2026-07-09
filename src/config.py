@@ -20,9 +20,6 @@ from src.storage.paths import (  # noqa: E402
     silver_parquet,
 )
 
-LAKEHOUSE_DIR = PROJECT_ROOT / "lakehouse"  # legacy / migration locale
-MONITORING_DIR = PROJECT_ROOT / "monitoring"  # legacy / migration locale
-
 ML_PREDICTION_YEAR = 2026
 
 MASSIVE_CACHE_DIR = massive_cache_dir()
@@ -32,6 +29,7 @@ MASSIVE_API_BASE = "https://api.massive.com"
 MASSIVE_TICKER = "DIA"
 FINNHUB_TICKER = os.getenv("FINNHUB_SYMBOL", MASSIVE_TICKER)
 FINNHUB_BUCKET_SEC = int(os.getenv("FINNHUB_BUCKET_SEC", "60"))
+FINNHUB_BUCKET_MODE = os.getenv("FINNHUB_BUCKET_MODE", "minute").lower()
 
 DATA_TYPES = {
     "stock_prices": "structured",

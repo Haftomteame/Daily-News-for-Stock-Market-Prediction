@@ -33,6 +33,12 @@ def ensure_schema_public(eng: Engine) -> None:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS public"))
 
 
+def ensure_schema(name: str, *, eng: Engine | None = None) -> None:
+    eng = eng or engine()
+    with eng.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{name}"'))
+
+
 def write_replace(table: str, df: pd.DataFrame, *, eng: Engine | None = None) -> None:
     """Remplace completement une table (DROP/CREATE implicite via pandas)."""
     eng = eng or engine()

@@ -57,10 +57,11 @@ def list_available(client, year: int, month: int | None = None) -> list[str]:
     return sorted(keys)
 
 
-def download_day(client, trade_date: date, output_dir: str) -> str | None:
+def download_day(client, trade_date: date, output_dir: str | os.PathLike[str]) -> str | None:
     key = s3_key(trade_date)
     from src.storage.io import exists as storage_exists, makedirs, write_bytes
 
+    output_dir = os.fspath(output_dir)
     makedirs(output_dir)
     out_path = f"{output_dir.rstrip('/')}/{trade_date:%Y-%m-%d}.csv.gz"
 
@@ -170,8 +171,12 @@ def infer_date_range_from_news() -> tuple[date, date]:
     else:
         from src.config import LEGACY_DATA_DIR
 
-        legacy = LEGACY_DATA_DIR / "RedditNews.csv"
-        if not legacy.exists():
+        legacy_candidates = [
+            LEGACY_DATA_DIR / "RedditNews_2024_2026.csv",
+            LEGACY_DATA_DIR / "RedditNews.csv",
+        ]
+        legacy = next((p for p in legacy_candidates if p.exists()), None)
+        if legacy is None:
             raise FileNotFoundError(
                 "Bronze news_reddit absent. Executez --refresh-bronze ou migrate_to_lakehouse.py"
             )

@@ -85,8 +85,9 @@ def exists(path: str) -> bool:
     return get_fs().exists(path)
 
 
-def makedirs(path: str) -> None:
-    parent = path.replace("\\", "/").rsplit("/", 1)[0]
+def makedirs(path: str | os.PathLike[str]) -> None:
+    path_str = os.fspath(path).replace("\\", "/")
+    parent = path_str.rsplit("/", 1)[0]
     if parent:
         get_fs().makedirs(parent, exist_ok=True)
 
