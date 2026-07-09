@@ -50,6 +50,10 @@ services:
 
     restart: unless-stopped
 
+    ports:
+
+      - "9864:9864"
+
     env_file:
 
       - hadoop.env
@@ -158,8 +162,6 @@ services:
 
     image: bde2020/spark-worker:3.3.0-hadoop3.3
 
-    container_name: datax-spark-gold
-
     profiles: [hdfs, spark]
 
     environment:
@@ -215,6 +217,8 @@ services:
       STORAGE_BACKEND: hdfs
 
       HDFS_NAMENODE: namenode
+
+      HDFS_DATANODE_HOST: datanode
 
       HDFS_WEB_PORT: "9870"
 
@@ -278,13 +282,25 @@ services:
 
       LOCAL_STORAGE_ROOT: /app
 
+      PGHOST: postgres
+
+      PGPORT: "5432"
+
+      PGDATABASE: wherehouse
+
+      PGUSER: datax
+
+      PGPASSWORD: 10102026Ha
+
     volumes:
 
       - ./lakehouse:/app/lakehouse
 
       - ./monitoring:/app/monitoring
 
-      - ./Data:/app/Data:ro
+      - ./dashboard:/app/dashboard
+
+      - ./src:/app/src
 
     restart: unless-stopped
 
@@ -338,13 +354,13 @@ services:
 
       FINNHUB_SYMBOL: DIA
 
+      FINNHUB_BUCKET_MODE: minute
+
       FINNHUB_BUCKET_SEC: "60"
 
     volumes:
 
       - ./lakehouse:/app/lakehouse
-
-      - ./Data:/app/Data
 
     restart: unless-stopped
 
@@ -360,8 +376,6 @@ services:
 
       - --lakehouse
 
-      - --csv
-
 
 
   finnhub-stream-hdfs:
@@ -372,7 +386,7 @@ services:
 
     container_name: datax-finnhub-stream-hdfs
 
-    profiles: [hdfs, stream]
+    profiles: [hdfs]
 
     env_file:
 
@@ -386,6 +400,8 @@ services:
 
       HDFS_NAMENODE: namenode
 
+      HDFS_DATANODE_HOST: datanode
+
       HDFS_WEB_PORT: "9870"
 
       HDFS_PORT: "8020"
@@ -395,6 +411,8 @@ services:
       HDFS_BASE_PATH: /datax
 
       FINNHUB_SYMBOL: DIA
+
+      FINNHUB_BUCKET_MODE: minute
 
       FINNHUB_BUCKET_SEC: "60"
 
@@ -410,7 +428,7 @@ services:
 
         python scripts/wait_for_hdfs.py &&
 
-        python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse --csv
+        python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse
 
     depends_on:
 
@@ -446,6 +464,8 @@ services:
 
       HDFS_NAMENODE: namenode
 
+      HDFS_DATANODE_HOST: datanode
+
       HDFS_WEB_PORT: "9870"
 
       HDFS_PORT: "8020"
@@ -453,6 +473,26 @@ services:
       HDFS_USER: hdfs
 
       HDFS_BASE_PATH: /datax
+
+      PGHOST: postgres
+
+      PGPORT: "5432"
+
+      PGDATABASE: wherehouse
+
+      PGUSER: datax
+
+      PGPASSWORD: 10102026Ha
+
+    volumes:
+
+      - ./lakehouse:/app/lakehouse
+
+      - ./monitoring:/app/monitoring
+
+      - ./dashboard:/app/dashboard
+
+      - ./src:/app/src
 
     restart: unless-stopped
 
@@ -520,8 +560,6 @@ services:
 
       - ./monitoring:/app/monitoring
 
-      - ./Data:/app/Data
-
     command:
 
       - python
@@ -557,6 +595,8 @@ services:
       STORAGE_BACKEND: hdfs
 
       HDFS_NAMENODE: namenode
+
+      HDFS_DATANODE_HOST: datanode
 
       HDFS_WEB_PORT: "9870"
 
@@ -745,6 +785,8 @@ services:
 
       HDFS_NAMENODE: namenode
 
+      HDFS_DATANODE_HOST: datanode
+
       HDFS_WEB_PORT: "9870"
 
       HDFS_PORT: "8020"
@@ -828,6 +870,8 @@ services:
 
       HDFS_NAMENODE: namenode
 
+      HDFS_DATANODE_HOST: datanode
+
       HDFS_WEB_PORT: "9870"
 
       HDFS_PORT: "8020"
@@ -884,6 +928,28 @@ services:
 
         condition: service_healthy
 
+  ubuntu:
+    build:
+      context: .
+      dockerfile: docker/ubuntu-box/Dockerfile
+    container_name: ubuntu-box
+    tty: true
+    stdin_open: true
+    working_dir: /data
+    volumes:
+      - ubuntu_data:/data
+      - .:/app
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: wherehouse
+      PGUSER: datax
+      PGPASSWORD: 10102026Ha
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    command: bash
 
 
 volumes:
@@ -895,4 +961,7 @@ volumes:
   postgres_data:
 
   airflow_postgres_data:
+
+  ubuntu_data:
+ 
 

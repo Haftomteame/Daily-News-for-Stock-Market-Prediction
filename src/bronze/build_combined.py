@@ -66,24 +66,3 @@ def build_combined_from_frames(
     top_cols = [f"Top{i}" for i in range(1, top_n + 1)]
     combined = combined[["Date", "Label", *top_cols]]
     return combined, labeled
-
-
-def build_combined(
-    stock_path: Path,
-    reddit_path: Path,
-    top_n: int = TOP_N,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Retourne (combined, stock_avec_labels) depuis fichiers CSV (legacy)."""
-    return build_combined_from_frames(
-        pd.read_csv(stock_path),
-        pd.read_csv(reddit_path),
-        top_n=top_n,
-    )
-
-
-def stock_for_pipeline(stock: pd.DataFrame) -> pd.DataFrame:
-    """Format upload_DJIA_table.csv."""
-    cols = ["Date", "Open", "High", "Low", "Close", "Volume", "Adj Close"]
-    out = stock[cols].copy()
-    out["Date"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
-    return out

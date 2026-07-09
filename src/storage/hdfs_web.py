@@ -5,9 +5,33 @@ from __future__ import annotations
 import fnmatch
 import os
 from typing import Iterator
+from urllib.parse import urlparse, urlunparse
 
+import requests
 from hdfs import InsecureClient
 from hdfs.util import HdfsError
+
+
+def _rewrite_datanode_redirect(response: requests.Response, *args, **kwargs) -> requests.Response:
+    """Reecrit les redirects WebHDFS vers un hote datanode joignable."""
+    if response.status_code not in {301, 302, 303, 307, 308}:
+        return response
+    location = response.headers.get("Location")
+    if not location or "/webhdfs/" not in location:
+        return response
+    parsed = urlparse(location)
+    datanode_host = os.getenv("HDFS_DATANODE_HOST", "localhost")
+    datanode_port = os.getenv("HDFS_DATANODE_WEB_PORT", "9864")
+    target = f"{datanode_host}:{datanode_port}"
+    # Depuis un conteneur Docker, le datanode annonce souvent localhost:9864.
+    if parsed.hostname in {"localhost", "127.0.0.1"}:
+        if parsed.netloc != target:
+            response.headers["Location"] = urlunparse(parsed._replace(netloc=target))
+        return response
+    if parsed.hostname in {datanode_host, os.getenv("HDFS_NAMENODE", "localhost")}:
+        return response
+    response.headers["Location"] = urlunparse(parsed._replace(netloc=target))
+    return response
 
 
 class WebHdfsFilesystem:
@@ -15,7 +39,9 @@ class WebHdfsFilesystem:
         host = os.getenv("HDFS_NAMENODE", "localhost")
         port = os.getenv("HDFS_WEB_PORT", "9870")
         user = os.getenv("HDFS_USER", "hdfs")
-        self._client = InsecureClient(f"http://{host}:{port}", user=user)
+        session = requests.Session()
+        session.hooks["response"].append(_rewrite_datanode_redirect)
+        self._client = InsecureClient(f"http://{host}:{port}", user=user, session=session)
 
     @staticmethod
     def _path(path: str) -> str:

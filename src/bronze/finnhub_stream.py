@@ -11,15 +11,16 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from src.bronze.storage import append_bronze_rows
-from src.config import BRONZE_TABLES
+from src.config import BRONZE_TABLES, FINNHUB_BUCKET_MODE
 
 FINNHUB_TOKEN_ENV = "FINNHUB_TOKEN"
 FINNHUB_WS_URL = "wss://ws.finnhub.io"
 NY_TZ = ZoneInfo("America/New_York")
+BucketMode = Literal["minute", "day"]
 
 OHLCV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "Adj Close"]
 DEFAULT_BRONZE_TABLE = BRONZE_TABLES.get("stock_prices_1m", "stock_prices_1m")
@@ -42,16 +43,30 @@ def _token() -> str:
     return token
 
 
-def format_candle_date(bucket_ms: int) -> str:
+def resolve_bucket_mode(mode: str | None = None) -> BucketMode:
+    value = (mode or os.getenv("FINNHUB_BUCKET_MODE", FINNHUB_BUCKET_MODE)).lower()
+    if value in {"day", "daily", "1d", "d"}:
+        return "day"
+    return "minute"
+
+
+def bronze_table_for_mode(mode: BucketMode) -> str:
+    return BRONZE_TABLES["stock_prices"] if mode == "day" else BRONZE_TABLES["stock_prices_1m"]
+
+
+def format_candle_date(bucket_ms: int, *, daily: bool = False) -> str:
     dt = datetime.fromtimestamp(bucket_ms / 1000, tz=NY_TZ)
+    if daily:
+        return dt.strftime("%Y-%m-%d 00:00:00")
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 @dataclass
 class CandleAgg:
-    """Agregation OHLCV sur fenetres fixes (ex. 60 s)."""
+    """Agregation OHLCV sur fenetres fixes (minute) ou par jour (NY)."""
 
     bucket_sec: int = 60
+    bucket_mode: BucketMode = "minute"
     cur_bucket_ms: int | None = field(default=None, init=False)
     o: float | None = field(default=None, init=False)
     h: float | None = field(default=None, init=False)
@@ -60,19 +75,18 @@ class CandleAgg:
     v: float = field(default=0.0, init=False)
 
     def bucket_start_ms(self, ts_ms: int) -> int:
+        if self.bucket_mode == "day":
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=NY_TZ)
+            day_start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            return int(day_start.timestamp() * 1000)
         bucket_ms = self.bucket_sec * 1000
         return (ts_ms // bucket_ms) * bucket_ms
 
-    def _start_bucket(self, bucket_ms: int, price: float, size: float) -> None:
-        self.cur_bucket_ms = bucket_ms
-        self.o = self.h = self.l = self.c = price
-        self.v = float(size)
-
-    def _finish(self) -> dict:
+    def _row_from_state(self) -> dict:
         if self.cur_bucket_ms is None or self.o is None:
             raise FinnhubStreamError("Aucune bougie en cours.")
-        row = {
-            "Date": format_candle_date(self.cur_bucket_ms),
+        return {
+            "Date": format_candle_date(self.cur_bucket_ms, daily=self.bucket_mode == "day"),
             "Open": self.o,
             "High": self.h,
             "Low": self.l,
@@ -80,10 +94,23 @@ class CandleAgg:
             "Volume": self.v,
             "Adj Close": self.c,
         }
+
+    def _start_bucket(self, bucket_ms: int, price: float, size: float) -> None:
+        self.cur_bucket_ms = bucket_ms
+        self.o = self.h = self.l = self.c = price
+        self.v = float(size)
+
+    def _finish(self) -> dict:
+        row = self._row_from_state()
         self.cur_bucket_ms = None
         self.o = self.h = self.l = self.c = None
         self.v = 0.0
         return row
+
+    def current_row(self) -> dict | None:
+        if self.cur_bucket_ms is None:
+            return None
+        return self._row_from_state()
 
     def update_trade(self, price: float, size: float, ts_ms: int) -> dict | None:
         bucket_ms = self.bucket_start_ms(ts_ms)
@@ -135,7 +162,7 @@ class CsvCandleSink:
 
 
 class BronzeLakehouseSink:
-    """Buffer puis flush vers lakehouse/bronze/stock_prices_1m/."""
+    """Buffer puis flush vers lakehouse/bronze/."""
 
     def __init__(
         self,
@@ -189,18 +216,20 @@ class MultiCandleSink:
 
 
 class FinnhubOhlcvStreamer:
-    """Client WebSocket Finnhub : trades -> OHLCV 1 min."""
+    """Client WebSocket Finnhub : trades -> OHLCV minute ou journalier."""
 
     def __init__(
         self,
         symbol: str,
         *,
         bucket_sec: int = 60,
+        bucket_mode: BucketMode = "minute",
         sink: CandleSink,
         max_candles: int | None = None,
     ) -> None:
         self.symbol = symbol.upper()
-        self.agg = CandleAgg(bucket_sec=bucket_sec)
+        self.bucket_mode = bucket_mode
+        self.agg = CandleAgg(bucket_sec=bucket_sec, bucket_mode=bucket_mode)
         self.sink = sink
         self.max_candles = max_candles
         self._candles_written = 0
@@ -208,8 +237,10 @@ class FinnhubOhlcvStreamer:
         self._token = _token()
         self._ws = None
 
-    def _emit_candle(self, row: dict) -> None:
+    def _emit_candle(self, row: dict, *, count: bool = True) -> None:
         self.sink.write(row)
+        if not count:
+            return
         self._candles_written += 1
         if self.max_candles is not None and self._candles_written >= self.max_candles:
             self._stop = True
@@ -222,11 +253,15 @@ class FinnhubOhlcvStreamer:
         for trade in payload.get("data") or []:
             finished = self.agg.update_trade(
                 float(trade["p"]),
-                float(trade.get("s", 0.0)),
+                float(trade.get("v", 0.0)),
                 int(trade["t"]),
             )
             if finished is not None:
                 self._emit_candle(finished)
+            elif self.bucket_mode == "day":
+                current = self.agg.current_row()
+                if current is not None:
+                    self._emit_candle(current, count=False)
 
     def _shutdown(self) -> None:
         self._stop = True
@@ -249,7 +284,8 @@ class FinnhubOhlcvStreamer:
         backoff = 1
 
         def on_open(ws) -> None:
-            print(f"[finnhub] connecte — abonnement {self.symbol}", flush=True)
+            label = "journalier" if self.bucket_mode == "day" else f"{self.agg.bucket_sec}s"
+            print(f"[finnhub] connecte — abonnement {self.symbol} ({label})", flush=True)
             ws.send(json.dumps({"type": "subscribe", "symbol": self.symbol}))
 
         def on_message(ws, message: str) -> None:
@@ -290,18 +326,23 @@ def build_streamer(
     symbol: str,
     *,
     bucket_sec: int = 60,
+    bucket_mode: str | None = None,
     out_csv: Path | None = None,
     lakehouse: bool = True,
     flush_every: int = 1,
     max_candles: int | None = None,
 ) -> FinnhubOhlcvStreamer:
+    mode = resolve_bucket_mode(bucket_mode)
     sinks: list[CandleSink] = []
     batch_id = f"finnhub-stream-{uuid.uuid4().hex[:8]}"
-    source_label = f"finnhub_ws_{symbol.lower()}_1m"
+    suffix = "1d" if mode == "day" else "1m"
+    source_label = f"finnhub_ws_{symbol.lower()}_{suffix}"
+    bronze_table = bronze_table_for_mode(mode)
 
     if lakehouse:
         sinks.append(
             BronzeLakehouseSink(
+                table=bronze_table,
                 source_label=source_label,
                 batch_id=batch_id,
                 flush_every=flush_every,
@@ -316,6 +357,7 @@ def build_streamer(
     return FinnhubOhlcvStreamer(
         symbol,
         bucket_sec=bucket_sec,
+        bucket_mode=mode,
         sink=sink,
         max_candles=max_candles,
     )

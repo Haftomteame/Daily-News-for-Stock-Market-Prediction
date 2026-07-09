@@ -68,7 +68,7 @@ def main() -> None:
         dl_parser.error("Precisez --date ou --from / --to")
 
     print(f"Telechargement {start} -> {end} vers {args.output_dir}")
-    paths = download_range(start, end, args.output_dir, client)
+    paths = download_range(start, end, str(args.output_dir), client)
     print(f"\nTermine : {len(paths)} fichier(s) telecharge(s)")
 
 
