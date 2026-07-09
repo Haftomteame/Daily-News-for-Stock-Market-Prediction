@@ -178,8 +178,11 @@ def fetch_range_arctic(
 
 
 def _save_partial(rows: list[dict], path: str) -> None:
+    from src.storage.io import write_text
+
     df = pd.DataFrame(rows).drop_duplicates(subset=["Date", "News"])
-    df[["Date", "News"]].to_csv(path, index=False)
+    cols = [c for c in ("Date", "News", "subreddit") if c in df.columns]
+    write_text(df[cols].to_csv(index=False), path)
 
 
 def fetch_recent_praw(

@@ -44,6 +44,16 @@ st.title("Data Lakehouse — Daily News / Stock Market")
 st.caption(f"Architecture Medallion : Bronze → Silver → Gold + ML | Stockage : {storage_label()}")
 
 
+def format_metric_pct(value: float | int | None) -> str:
+    """Affiche une metrique en pourcentage (accepte 0-1 ou 0-100)."""
+    if value is None:
+        return "N/A"
+    v = float(value)
+    if v > 1.0:
+        v /= 100.0
+    return f"{v:.1%}"
+
+
 @st.cache_data
 def load_gold(_gold_mtime: float) -> pd.DataFrame:
     if pg_enabled():
@@ -148,7 +158,10 @@ with tab_overview:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Jours Gold", len(gold) if not gold.empty else 0)
     c2.metric("Runs monitorés", monitoring["batch_id"].nunique() if not monitoring.empty else 0)
-    c3.metric("Accuracy ML", f"{ml_metrics['accuracy']:.1%}" if ml_metrics else "N/A")
+    c3.metric(
+        "Accuracy ML (holdout)",
+        format_metric_pct(ml_metrics.get("accuracy")) if ml_metrics else "N/A",
+    )
     c4.metric("Modele", "OK" if exists(ML_MODEL_PATH) else "Absent")
 
     st.subheader("Flux de donnees")
@@ -158,7 +171,7 @@ with tab_overview:
     | **Bronze** | DJIA + Reddit + Combined | ELT brut (HDFS ou local) |
     | **Silver** | Nettoyage, metadata, label ML | Qualite |
     | **Gold** | KPIs journaliers (schema fixe) | Analytics |
-    | **ML** | LogisticRegression sur features Gold + Combined | Prediction Label |
+    | **ML** | TF-IDF headlines (Top1..Top25) + KPIs news/volatilite | Prediction Label |
     """)
 
     if gold.empty:
@@ -272,21 +285,47 @@ with tab_ml:
     if not ml_metrics:
         st.info("Modele ML non entraine. Executez le pipeline complet.")
     else:
+        predict_year = ml_metrics.get("prediction_year", "N/A")
+        st.caption(
+            f"Metriques calculees sur le holdout (annee {predict_year}), "
+            f"hors periode d'entrainement."
+        )
+
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Accuracy", f"{ml_metrics['accuracy']:.1%}")
-        c2.metric("Precision", f"{ml_metrics['precision']:.1%}")
-        c3.metric("Recall", f"{ml_metrics['recall']:.1%}")
-        c4.metric("F1", f"{ml_metrics['f1']:.1%}")
+        c1.metric("Accuracy (holdout)", format_metric_pct(ml_metrics.get("accuracy")))
+        c2.metric("Precision (holdout)", format_metric_pct(ml_metrics.get("precision")))
+        c3.metric("Recall (holdout)", format_metric_pct(ml_metrics.get("recall")))
+        c4.metric("F1 (holdout)", format_metric_pct(ml_metrics.get("f1")))
+
+        if any(k in ml_metrics for k in ("train_accuracy", "train_f1")):
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("Accuracy (train)", format_metric_pct(ml_metrics.get("train_accuracy")))
+            t2.metric("Precision (train)", format_metric_pct(ml_metrics.get("train_precision")))
+            t3.metric("Recall (train)", format_metric_pct(ml_metrics.get("train_recall")))
+            t4.metric("F1 (train)", format_metric_pct(ml_metrics.get("train_f1")))
 
         st.subheader("Features utilisees")
         st.code("\n".join(ml_metrics.get("features", [])))
+        removed = ml_metrics.get("removed_features", [])
+        if removed:
+            st.caption(f"Features retirees (redondantes) : {', '.join(removed)}")
 
         if ml_metrics.get("prediction_year"):
             st.caption(
-                f"Entrainement : {ml_metrics.get('train_period', 'N/A')} | "
-                f"Prediction {ml_metrics['prediction_year']} : "
-                f"{ml_metrics.get('predict_period', 'N/A')}"
+                f"Entrainement eval : {ml_metrics.get('train_period', 'N/A')} | "
+                f"Holdout {ml_metrics['prediction_year']} : "
+                f"{ml_metrics.get('predict_period', 'N/A')} | "
+                f"Echantillons train/holdout : "
+                f"{ml_metrics.get('samples_train', 'N/A')} / "
+                f"{ml_metrics.get('samples_predict', 'N/A')}"
             )
+        if ml_metrics.get("retrain_on_all") and ml_metrics.get("production_samples"):
+            st.success(
+                f"Modele production sauvegarde : entraine sur **{ml_metrics['production_samples']}** jours "
+                f"({ml_metrics.get('production_period', 'toutes donnees')}) avec hyperparametres optimises."
+            )
+        if ml_metrics.get("best_params"):
+            st.caption(f"Hyperparametres (CV temporelle) : {ml_metrics['best_params']}")
 
         if not predictions.empty:
             st.subheader(f"Predictions {ml_metrics.get('prediction_year', '')} vs Label reel")

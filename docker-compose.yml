@@ -50,6 +50,10 @@ services:
 
     restart: unless-stopped
 
+    ports:
+
+      - "9864:9864"
+
     env_file:
 
       - hadoop.env
@@ -213,6 +217,8 @@ services:
       STORAGE_BACKEND: hdfs
 
       HDFS_NAMENODE: namenode
+
+      HDFS_DATANODE_HOST: datanode
 
       HDFS_WEB_PORT: "9870"
 
@@ -380,6 +386,8 @@ services:
 
       HDFS_NAMENODE: namenode
 
+      HDFS_DATANODE_HOST: datanode
+
       HDFS_WEB_PORT: "9870"
 
       HDFS_PORT: "8020"
@@ -441,6 +449,8 @@ services:
       STORAGE_BACKEND: hdfs
 
       HDFS_NAMENODE: namenode
+
+      HDFS_DATANODE_HOST: datanode
 
       HDFS_WEB_PORT: "9870"
 
@@ -551,6 +561,8 @@ services:
       STORAGE_BACKEND: hdfs
 
       HDFS_NAMENODE: namenode
+
+      HDFS_DATANODE_HOST: datanode
 
       HDFS_WEB_PORT: "9870"
 
@@ -739,6 +751,8 @@ services:
 
       HDFS_NAMENODE: namenode
 
+      HDFS_DATANODE_HOST: datanode
+
       HDFS_WEB_PORT: "9870"
 
       HDFS_PORT: "8020"
@@ -821,6 +835,8 @@ services:
       STORAGE_BACKEND: hdfs
 
       HDFS_NAMENODE: namenode
+
+      HDFS_DATANODE_HOST: datanode
 
       HDFS_WEB_PORT: "9870"
 
