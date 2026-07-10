@@ -22,6 +22,19 @@ from src.storage.paths import (  # noqa: E402
 
 ML_PREDICTION_YEAR = 2026
 
+TRAINING_SYMBOLS = [
+    "DIA",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "NVDA",
+    "META",
+    "TSLA",
+    "JPM",
+    "XOM",
+]
+
 MASSIVE_CACHE_DIR = massive_cache_dir()
 MASSIVE_S3_ENDPOINT = "https://files.massive.com"
 MASSIVE_S3_BUCKET = "flatfiles"

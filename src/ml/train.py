@@ -1,4 +1,4 @@
-"""Entrainement ML — prediction Label (direction DJIA) depuis headlines + KPIs Gold."""
+"""Entrainement ML — prediction direction (hausse/baisse) par symbole."""
 
 from __future__ import annotations
 
@@ -14,15 +14,19 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from src.bronze.build_combined import aggregate_reddit_tops, compute_labels
 from src.config import (
-    ML_METRICS_PATH,
-    ML_MODEL_PATH,
+    MASSIVE_TICKER,
     ML_PREDICTION_YEAR,
-    ML_PREDICTIONS_PATH,
+    TRAINING_SYMBOLS,
+    bronze_data_path,
     gold_data_path,
     silver_data_path,
 )
+from src.db.postgres import pg_enabled, read_sql
+from src.silver.transform import _has_finance_keyword
 from src.storage.io import exists, query_duckdb, write_json, write_joblib, write_parquet
+from src.storage.paths import ml_metrics_path, ml_model_path, ml_predictions_path
 
 TOP_COLS = [f"Top{i}" for i in range(1, 26)]
 NUMERIC_FEATURES = [
@@ -32,7 +36,6 @@ NUMERIC_FEATURES = [
     "finance_news_ratio",
 ]
 
-# Valeurs par defaut (surchargees par le tuning)
 TFIDF_MAX_FEATURES = 300
 TFIDF_MIN_DF = 3
 LOGISTIC_C = 0.1
@@ -66,7 +69,8 @@ def _concat_headlines(row: pd.Series) -> str:
     return " ".join(parts)
 
 
-def _load_training_data() -> pd.DataFrame:
+def _load_training_data_lakehouse() -> pd.DataFrame:
+    """Dataset legacy DIA depuis Gold + Silver combined."""
     gold_path = gold_data_path()
     combined_path = silver_data_path("news_combined")
 
@@ -95,14 +99,136 @@ def _load_training_data() -> pd.DataFrame:
     )
     df["date"] = pd.to_datetime(df["date"])
     df["headline_text"] = df.apply(_concat_headlines, axis=1)
+    return df[df["headline_text"].str.len() > 0].copy()
+
+
+def _reddit_data_path() -> str | None:
+    silver = silver_data_path("news_reddit")
+    if exists(silver):
+        return silver
+    bronze = bronze_data_path("news_reddit")
+    if exists(bronze):
+        return bronze
+    return None
+
+
+def _load_reddit_for_symbol(symbol: str) -> pd.DataFrame:
+    """Charge Reddit pour l'entrainement (titres generaux — couverture temporelle complete)."""
+    path = _reddit_data_path()
+    if not path:
+        raise FileNotFoundError("Couche news_reddit absente (bronze ou silver).")
+
+    return query_duckdb(
+        """
+        SELECT CAST("Date" AS DATE) AS Date, CAST(News AS VARCHAR) AS News
+        FROM data_table
+        WHERE News IS NOT NULL AND TRIM(CAST(News AS VARCHAR)) != ''
+        """,
+        {"data_table": path},
+    )
+
+
+def _daily_news_kpis(reddit: pd.DataFrame) -> pd.DataFrame:
+    df = reddit.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+    df["_finance"] = df["News"].astype(str).apply(_has_finance_keyword)
+    agg = (
+        df.groupby("Date", as_index=False)
+        .agg(
+            news_count=("News", "count"),
+            finance_news_ratio=("_finance", "mean"),
+        )
+        .rename(columns={"Date": "date"})
+    )
+    return agg
+
+
+def _load_ohlcv_kpis(symbol: str) -> pd.DataFrame:
+    symbol = symbol.upper()
+    if not pg_enabled():
+        return pd.DataFrame()
+
+    raw = read_sql(
+        """
+        SELECT date, open, high, low, close, volume
+        FROM stocks.ohlcv
+        WHERE act_symbol = :symbol
+        ORDER BY date
+        """,
+        params={"symbol": symbol},
+    )
+    if raw.empty:
+        return pd.DataFrame()
+
+    stock = raw.rename(
+        columns={
+            "date": "Date",
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+    )
+    stock["Date"] = pd.to_datetime(stock["Date"], errors="coerce")
+    stock = stock.dropna(subset=["Date"]).sort_values("Date")
+
+    labeled = compute_labels(stock)
+    labeled["date"] = pd.to_datetime(labeled["Date"])
+    labeled["daily_return_pct"] = labeled["Close"].pct_change() * 100
+    labeled["volatility_5d"] = labeled["daily_return_pct"].rolling(5, min_periods=1).std()
+    return labeled
+
+
+def _load_training_data(symbol: str | None = None) -> pd.DataFrame:
+    """Charge le dataset d'entrainement pour un symbole (PostgreSQL + Reddit)."""
+    symbol = (symbol or MASSIVE_TICKER).upper()
+
+    if symbol == MASSIVE_TICKER and not pg_enabled():
+        return _load_training_data_lakehouse()
+
+    ohlcv = _load_ohlcv_kpis(symbol)
+    if ohlcv.empty:
+        if symbol == MASSIVE_TICKER:
+            return _load_training_data_lakehouse()
+        raise FileNotFoundError(f"Aucun OHLCV PostgreSQL pour {symbol}.")
+
+    reddit = _load_reddit_for_symbol(symbol)
+    tops = aggregate_reddit_tops(reddit)
+    tops["date"] = pd.to_datetime(tops["Date"])
+    news_kpis = _daily_news_kpis(reddit)
+
+    df = ohlcv.merge(tops, on="date", how="inner", suffixes=("", "_top"))
+    df = df.merge(news_kpis, on="date", how="left")
+    df["news_count"] = df["news_count"].fillna(0)
+    df["finance_news_ratio"] = df["finance_news_ratio"].fillna(0)
+    if "label" not in df.columns and "Label" in df.columns:
+        df["label"] = df["Label"]
+    df["headline_text"] = df.apply(_concat_headlines, axis=1)
     df = df[df["headline_text"].str.len() > 0].copy()
+    df = df[df["label"].isin([0, 1])].sort_values("date")
     return df
 
 
-def _temporal_split(df: pd.DataFrame, prediction_year: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train_df = df[df["date"].dt.year < prediction_year].copy()
-    predict_df = df[df["date"].dt.year == prediction_year].copy()
-    return train_df, predict_df
+def _temporal_split(
+    df: pd.DataFrame,
+    prediction_year: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+    available_years = sorted(int(y) for y in df["date"].dt.year.unique())
+    year = prediction_year
+    if year not in available_years:
+        year = available_years[-1]
+
+    train_df = df[df["date"].dt.year < year].copy()
+    predict_df = df[df["date"].dt.year == year].copy()
+
+    if predict_df.empty and len(available_years) >= 2:
+        year = available_years[-1]
+        train_df = df[df["date"].dt.year < year].copy()
+        predict_df = df[df["date"].dt.year == year].copy()
+
+    return train_df, predict_df, year
 
 
 def _feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -165,7 +291,6 @@ def _tune_hyperparameters(
     random_state: int,
     n_splits: int = 5,
 ) -> dict[str, float | int]:
-    """Validation croisee temporelle sur la periode d'entrainement."""
     X = _feature_matrix(train_df)
     y = train_df["label"].astype(int)
     tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -207,27 +332,42 @@ def _tune_hyperparameters(
     return best_params
 
 
+def _write_legacy_dia_artifacts(
+    model: Pipeline,
+    metrics: dict,
+    predictions: pd.DataFrame,
+) -> None:
+    """Compatibilite : copie les artefacts DIA vers lakehouse/ml/ (chemins historiques)."""
+    from src.config import ML_METRICS_PATH, ML_MODEL_PATH, ML_PREDICTIONS_PATH
+
+    write_joblib(model, ML_MODEL_PATH)
+    write_json(metrics, ML_METRICS_PATH)
+    write_parquet(predictions, ML_PREDICTIONS_PATH)
+
+
 def run_ml_training(
     batch_id: str,
     prediction_year: int | None = None,
     random_state: int = 42,
     *,
+    symbol: str | None = None,
     tune: bool = True,
     retrain_on_all: bool = True,
 ) -> dict:
+    symbol = (symbol or MASSIVE_TICKER).upper()
     prediction_year = prediction_year or ML_PREDICTION_YEAR
-    df = _load_training_data()
-    train_df, predict_df = _temporal_split(df, prediction_year)
+    df = _load_training_data(symbol)
+    train_df, predict_df, prediction_year = _temporal_split(df, prediction_year)
 
     if len(train_df) < 50:
         raise ValueError(
-            f"Dataset d'entrainement trop petit ({len(train_df)} lignes) "
+            f"Dataset d'entrainement trop petit pour {symbol} ({len(train_df)} lignes) "
             f"pour prediction_year={prediction_year}."
         )
     if predict_df.empty:
-        available = sorted(df["date"].dt.year.unique().tolist())
+        available = sorted(int(y) for y in df["date"].dt.year.unique())
         raise ValueError(
-            f"Aucune donnee pour predire en {prediction_year}. "
+            f"Aucune donnee pour predire {symbol} en {prediction_year}. "
             f"Annees disponibles : {available}. "
             f"Le dataset s'arrete en {df['date'].max().date()}."
         )
@@ -250,7 +390,6 @@ def run_ml_training(
     y_true = predict_df["label"].astype(int)
 
     model.fit(X_train, y_train)
-
     y_train_pred = model.predict(X_train)
     y_pred = model.predict(X_predict)
 
@@ -281,6 +420,7 @@ def run_ml_training(
 
     metrics = {
         "batch_id": batch_id,
+        "symbol": symbol,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "prediction_year": prediction_year,
         "train_period": f"{train_start} -> {train_end}",
@@ -305,23 +445,70 @@ def run_ml_training(
         "retrain_on_all": retrain_on_all,
     }
 
-    write_joblib(production_model, ML_MODEL_PATH)
-    write_json(metrics, ML_METRICS_PATH)
+    model_path = ml_model_path(symbol)
+    metrics_path = ml_metrics_path(symbol)
+    predictions_path = ml_predictions_path(symbol)
+
+    write_joblib(production_model, model_path)
+    write_json(metrics, metrics_path)
 
     predictions = predict_df.copy()
+    predictions["symbol"] = symbol
     predictions["predicted_label"] = y_pred
     predictions["probability_up"] = model.predict_proba(X_predict)[:, 1]
     predictions["correct"] = predictions["predicted_label"] == predictions["label"]
     predictions["_batch_id"] = batch_id
     predictions["_split"] = "predict"
-    write_parquet(predictions, ML_PREDICTIONS_PATH)
+    write_parquet(predictions, predictions_path)
+
+    if symbol == MASSIVE_TICKER:
+        _write_legacy_dia_artifacts(production_model, metrics, predictions)
 
     return {
         "batch_id": batch_id,
+        "symbol": symbol,
         "metrics": metrics,
-        "model_path": ML_MODEL_PATH,
-        "metrics_path": ML_METRICS_PATH,
-        "predictions_path": ML_PREDICTIONS_PATH,
+        "model_path": model_path,
+        "metrics_path": metrics_path,
+        "predictions_path": predictions_path,
         "rows": len(predictions),
         "prediction_year": prediction_year,
+    }
+
+
+def run_ml_training_all(
+    batch_id: str,
+    symbols: list[str] | None = None,
+    prediction_year: int | None = None,
+    *,
+    tune: bool = True,
+    retrain_on_all: bool = True,
+) -> dict:
+    """Entraine un modele par symbole et retourne le resume."""
+    symbols = [s.upper() for s in (symbols or TRAINING_SYMBOLS)]
+    trained: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+
+    for symbol in symbols:
+        print(f"[ml] Entrainement {symbol} ...", flush=True)
+        try:
+            trained[symbol] = run_ml_training(
+                batch_id,
+                prediction_year=prediction_year,
+                symbol=symbol,
+                tune=tune,
+                retrain_on_all=retrain_on_all,
+            )
+            acc = trained[symbol]["metrics"]["accuracy"]
+            print(f"  OK {symbol} — accuracy holdout {acc:.0%}", flush=True)
+        except (ValueError, FileNotFoundError) as exc:
+            errors[symbol] = str(exc)
+            print(f"  SKIP {symbol} — {exc}", flush=True)
+
+    return {
+        "batch_id": batch_id,
+        "trained": trained,
+        "errors": errors,
+        "symbols_ok": list(trained.keys()),
+        "symbols_failed": list(errors.keys()),
     }

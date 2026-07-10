@@ -13,7 +13,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd  # noqa: E402
 
-from src.db.postgres import ensure_schema, engine, pg_enabled, test_connection  # noqa: E402
+from src.db.postgres import (  # noqa: E402
+    ensure_schema,
+    ensure_warehouse_indexes,
+    engine,
+    pg_enabled,
+    test_connection,
+)
 from src.dolt.repos import (  # noqa: E402
     DEFAULT_REPOS,
     export_table_csv,
@@ -186,6 +192,13 @@ def main() -> int:
         print()
 
     if not args.dry_run:
+        print("Creation des index PostgreSQL (filtres par symbole)...")
+        created = ensure_warehouse_indexes(eng=eng)
+        if created:
+            for name in created:
+                print(f"  + {name}")
+        else:
+            print("  (deja a jour)")
         print("Termine.")
         for schema, tables in summary.items():
             total = sum(tables.values())

@@ -45,10 +45,14 @@ def _load_stock_prices_from_massive() -> pd.DataFrame:
 
 
 def _fetch_news_reddit(start: date, end: date) -> pd.DataFrame:
-    from src.bronze.reddit_fetch import RedditFetchError, fetch_range_arctic
+    from src.bronze.reddit_fetch import (
+        DEFAULT_SUBREDDITS,
+        RedditFetchError,
+        fetch_range_arctic,
+    )
 
     try:
-        return fetch_range_arctic(start, end, subreddits=["stocks", "wallstreetbets", "investing"])
+        return fetch_range_arctic(start, end, subreddits=list(DEFAULT_SUBREDDITS))
     except RedditFetchError as exc:
         raise FileNotFoundError(f"Fetch Reddit impossible : {exc}") from exc
 

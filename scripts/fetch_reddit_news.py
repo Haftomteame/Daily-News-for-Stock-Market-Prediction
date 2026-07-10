@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -61,6 +61,11 @@ def main() -> None:
         help="Ajouter aux donnees Bronze existantes (dedupe Date+News)",
     )
     parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Ne pas re-fetcher les dates deja presentes dans la table Bronze (--append requis)",
+    )
+    parser.add_argument(
         "--partial",
         type=Path,
         default=None,
@@ -89,6 +94,28 @@ def main() -> None:
 
             start = datetime.strptime(args.date_from, "%Y-%m-%d").date()
             end = datetime.strptime(args.date_to, "%Y-%m-%d").date()
+
+            if args.skip_existing:
+                if not args.append:
+                    parser.error("--skip-existing requiert --append")
+                if bronze_exists(args.table):
+                    import pandas as pd
+
+                    existing = read_bronze_data(args.table)
+                    max_day = pd.to_datetime(existing["Date"], errors="coerce").max().date()
+                    if max_day >= start:
+                        new_start = max_day + timedelta(days=1)
+                        if new_start > end:
+                            print(
+                                f"Skip : {args.table} couvre deja jusqu'a {max_day} "
+                                f"(demande {start} -> {end}). Rien a fetcher."
+                            )
+                            sys.exit(0)
+                        print(
+                            f"Skip existant : {start} -> {max_day} deja en bronze, "
+                            f"fetch a partir de {new_start}"
+                        )
+                        start = new_start
 
             def progress(day, day_count, total):
                 print(f"  {day}: +{day_count} (total {total})")

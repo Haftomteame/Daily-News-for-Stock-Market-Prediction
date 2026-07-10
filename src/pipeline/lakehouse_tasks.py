@@ -16,7 +16,7 @@ from src.bronze.ingest import (
 )
 from src.config import gold_data_path
 from src.gold.aggregate import run_gold_aggregate
-from src.ml.train import run_ml_training
+from src.ml.train import run_ml_training_all
 from src.monitoring.metrics import LayerMonitor
 from src.silver.transform import (
     transform_news_combined,
@@ -262,12 +262,15 @@ def run_gold_spark(ctx: PipelineContext) -> dict[str, Any]:
 
 
 def run_ml(ctx: PipelineContext) -> dict[str, Any]:
-    """Entrainement ML + predictions."""
-    result = run_ml_training(ctx.batch_id, prediction_year=ctx.predict_year)
+    """Entrainement ML + predictions (un modele par symbole)."""
+    result = run_ml_training_all(ctx.batch_id, prediction_year=ctx.predict_year)
     return {
-        "prediction_year": result["prediction_year"],
-        "metrics": result["metrics"],
-        "rows": result["rows"],
+        "symbols_ok": result["symbols_ok"],
+        "symbols_failed": result["symbols_failed"],
+        "trained": {
+            sym: info["metrics"]
+            for sym, info in result["trained"].items()
+        },
     }
 
 

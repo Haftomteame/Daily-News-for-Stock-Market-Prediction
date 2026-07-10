@@ -172,3 +172,113 @@ def test_connection(*, eng: Engine | None = None) -> None:
     with eng.begin() as conn:
         conn.execute(text("SELECT 1"))
 
+
+# Index pour les filtres act_symbol du dashboard (COUNT / dernière date).
+WAREHOUSE_INDEXES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("options", "option_chain", "idx_option_chain_act_symbol_date", ("act_symbol", "date")),
+    ("stocks", "ohlcv", "idx_ohlcv_act_symbol_date", ("act_symbol", "date")),
+    ("stocks", "dividend", "idx_dividend_act_symbol", ("act_symbol",)),
+    ("stocks", "split", "idx_split_act_symbol", ("act_symbol",)),
+    ("earnings", "earnings_calendar", "idx_earnings_calendar_act_symbol", ("act_symbol",)),
+    ("earnings", "eps_estimate", "idx_eps_estimate_act_symbol", ("act_symbol",)),
+    ("earnings", "eps_history", "idx_eps_history_act_symbol", ("act_symbol",)),
+    ("earnings", "balance_sheet_assets", "idx_balance_sheet_assets_act_symbol", ("act_symbol",)),
+    ("earnings", "balance_sheet_equity", "idx_balance_sheet_equity_act_symbol", ("act_symbol",)),
+    ("earnings", "balance_sheet_liabilities", "idx_balance_sheet_liabilities_act_symbol", ("act_symbol",)),
+    ("earnings", "cash_flow_statement", "idx_cash_flow_statement_act_symbol", ("act_symbol",)),
+    ("earnings", "income_statement", "idx_income_statement_act_symbol", ("act_symbol",)),
+    ("earnings", "rank_score", "idx_rank_score_act_symbol", ("act_symbol",)),
+    ("earnings", "sales_estimate", "idx_sales_estimate_act_symbol", ("act_symbol",)),
+)
+
+
+def _index_exists(schema: str, index_name: str, *, eng: Engine) -> bool:
+    df = read_sql(
+        """
+        SELECT 1
+        FROM pg_indexes
+        WHERE schemaname = :schema AND indexname = :index_name
+        LIMIT 1
+        """,
+        eng=eng,
+        params={"schema": schema, "index_name": index_name},
+    )
+    return not df.empty
+
+
+def _table_exists(schema: str, table: str, *, eng: Engine) -> bool:
+    df = read_sql(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = :schema AND table_name = :table
+        LIMIT 1
+        """,
+        eng=eng,
+        params={"schema": schema, "table": table},
+    )
+    return not df.empty
+
+
+def ensure_warehouse_indexes(*, eng: Engine | None = None) -> list[str]:
+    """Crée les index manquants pour accélérer les requêtes filtrées par symbole."""
+    eng = eng or engine()
+    created: list[str] = []
+    with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for schema, table, index_name, columns in WAREHOUSE_INDEXES:
+            if _index_exists(schema, index_name, eng=eng):
+                continue
+            if not _table_exists(schema, table, eng=eng):
+                continue
+            cols = ", ".join(columns)
+            conn.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "{index_name}" '
+                    f'ON "{schema}"."{table}" ({cols})'
+                )
+            )
+            created.append(f"{schema}.{index_name}")
+    return created
+
+
+def option_chain_latest_count(symbol: str, *, eng: Engine | None = None) -> int:
+    """Nombre de contrats à la dernière date disponible pour un symbole."""
+    eng = eng or engine()
+    df = read_sql(
+        """
+        SELECT COUNT(*) AS n
+        FROM options.option_chain
+        WHERE act_symbol = :symbol
+          AND date = (
+              SELECT date
+              FROM options.option_chain
+              WHERE act_symbol = :symbol
+              ORDER BY date DESC
+              LIMIT 1
+          )
+        """,
+        eng=eng,
+        params={"symbol": symbol.upper()},
+    )
+    return int(df.iloc[0]["n"] or 0)
+
+
+def symbol_row_count(
+    schema: str,
+    table: str,
+    symbol: str,
+    *,
+    eng: Engine | None = None,
+) -> int:
+    """Compte les lignes d'une table warehouse pour un symbole."""
+    eng = eng or engine()
+    symbol = symbol.upper()
+    if table == "symbol":
+        sql = "SELECT COUNT(*) AS n FROM stocks.symbol WHERE act_symbol = :symbol"
+    elif schema == "options" and table == "option_chain":
+        return option_chain_latest_count(symbol, eng=eng)
+    else:
+        sql = f'SELECT COUNT(*) AS n FROM "{schema}"."{table}" WHERE act_symbol = :symbol'
+    df = read_sql(sql, eng=eng, params={"symbol": symbol})
+    return int(df.iloc[0]["n"] or 0)
+

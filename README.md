@@ -1,46 +1,218 @@
 # Data Lakehouse — Daily News for Stock Market Prediction
 
-Architecture **Medallion** (Bronze / Silver / Gold) pour l'analyse conjointe de données boursières structurées et d'actualités Reddit non structurées.
+Projet d'architecture **DataX** : un lakehouse **Medallion** (Bronze / Silver / Gold) qui combine **cours boursiers**, **actualités Reddit** et **machine learning** pour analyser et prédire la direction du marché.
 
-## Architecture
+---
+
+## Sommaire
+
+1. [Objectif du projet](#objectif-du-projet)
+2. [Vue d'ensemble](#vue-densemble)
+3. [Démarrage rapide](#démarrage-rapide)
+4. [Prérequis et installation](#prérequis-et-installation)
+5. [Configuration](#configuration)
+6. [Architecture des données](#architecture-des-données)
+7. [Pipeline ELT](#pipeline-elt)
+8. [Machine learning](#machine-learning)
+9. [Dashboard Streamlit](#dashboard-streamlit)
+10. [Market Carpet](#market-carpet)
+11. [PostgreSQL et import Dolt](#postgresql-et-import-dolt)
+12. [Docker — profils et services](#docker--profils-et-services)
+13. [Streaming temps réel (Finnhub)](#streaming-temps-réel-finnhub)
+14. [Spark et Airflow](#spark-et-airflow)
+15. [Stockage local ou HDFS](#stockage-local-ou-hdfs)
+16. [Exécution complète](#exécution-complète)
+17. [Structure du code](#structure-du-code)
+18. [Tests](#tests)
+19. [Technologies](#technologies)
+
+---
+
+## Objectif du projet
+
+Ce dépôt implémente une chaîne de traitement de bout en bout :
+
+| Étape | Rôle |
+|-------|------|
+| **Ingestion** | Récupérer des prix OHLCV (Massive, Finnhub) et des titres Reddit |
+| **Transformation** | Nettoyer, enrichir et agréger les données (couches Silver et Gold) |
+| **Prédiction** | Entraîner un modèle de classification hausse/baisse à partir des news + KPIs |
+| **Visualisation** | Dashboard interactif (parcours des données, KPIs, prévisions, market carpet) |
+| **Orchestration** | Pipeline CLI, Docker ou Airflow avec monitoring (latence, coût, qualité) |
+
+**Cas d'usage principal** : comprendre comment le sentiment et le volume d'actualités Reddit se corrèlent aux mouvements du DJIA (indice DIA) et à d'autres symboles (AAPL, MSFT, NVDA, etc.).
+
+---
+
+## Vue d'ensemble
+
+```mermaid
+flowchart LR
+    subgraph sources [Sources externes]
+        M[Massive API / S3]
+        F[Finnhub WebSocket]
+        R[Reddit / Arctic Shift]
+        D[Dolt repos]
+    end
+
+    subgraph lakehouse [Lakehouse Parquet]
+        B[Bronze — brut]
+        S[Silver — nettoyé]
+        G[Gold — KPIs journaliers]
+        ML[ML — modèles + prédictions]
+    end
+
+    subgraph sorties [Sorties]
+        PG[(PostgreSQL)]
+        DB[Dashboard Streamlit]
+        MON[Monitoring JSON]
+    end
+
+    M --> B
+    F --> B
+    R --> B
+    B --> S --> G --> ML
+    G --> PG
+    S --> PG
+    ML --> DB
+    G --> DB
+    D --> PG
+    lakehouse --> MON
+```
+
+**En une phrase** : les données brutes arrivent en Bronze, sont nettoyées en Silver, agrégées en Gold, alimentent un modèle ML, puis sont exposées dans PostgreSQL et le dashboard.
+
+---
+
+## Démarrage rapide
+
+### Option A — Dashboard seul (le plus simple)
+
+Si le dossier `lakehouse/` contient déjà des données (fournies ou générées) :
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # puis renseigner les clés API si besoin
+python scripts/run_dashboard.py
+```
+
+→ Ouvrir **http://localhost:8502**
+
+### Option B — Pipeline complet en local
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+
+# Lit le bronze existant, transforme, agrège, entraîne le ML
+python pipeline/run_pipeline.py --massive --predict-year 2026
+
+python scripts/run_dashboard.py
+```
+
+### Option C — Stack Docker (PostgreSQL + dashboard)
+
+```bash
+cp .env.example .env
+docker compose up -d dashboard
+```
+
+→ Dashboard : **http://localhost:8502** — PostgreSQL : `localhost:5432` (voir [Configuration](#configuration))
+
+### Option D — Cluster complet (HDFS + Spark + Airflow)
+
+```bash
+docker compose --profile hdfs --profile spark --profile airflow up -d --build
+```
+
+| Interface | URL |
+|-----------|-----|
+| Dashboard HDFS | http://localhost:8503 |
+| HDFS NameNode | http://localhost:9870 |
+| Spark UI | http://localhost:8080 |
+| Airflow | http://localhost:8081 (`admin` / `admin`) |
+
+---
+
+## Prérequis et installation
+
+- **Python 3.10+**
+- **Docker & Docker Compose** (optionnel, pour HDFS, Airflow, PostgreSQL)
+- Clés API selon les fonctionnalités utilisées (voir [Configuration](#configuration))
+
+```bash
+git clone <url-du-repo>
+cd "Daily News for Stock Market Prediction"
+pip install -r requirements.txt
+```
+
+---
+
+## Configuration
+
+Copier `.env.example` vers `.env` et renseigner les variables nécessaires :
+
+| Variable | Usage |
+|----------|-------|
+| `FINNHUB_TOKEN` | Streaming OHLCV temps réel (WebSocket) |
+| `MASSIVE_API_KEY` | Prix journaliers historiques (REST) |
+| `MASSIVE_S3_ACCESS_KEY` / `MASSIVE_S3_SECRET_KEY` | Cache flat files Massive (optionnel) |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | Mode `--praw` uniquement |
+| `STORAGE_BACKEND` | `local` (défaut) ou `hdfs` |
+| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` | Connexion PostgreSQL |
+
+> Ne jamais committer le fichier `.env`. Les identifiants par défaut du compose Docker sont documentés dans `.env.example`.
+
+---
+
+## Architecture des données
 
 ```
-lakehouse/                     ← Source de verite (Parquet)
-├── bronze/                    ← Donnees brutes + metadata ingestion
+lakehouse/                     ← Source de vérité (Parquet)
+├── bronze/                    ← Données brutes + métadonnées d'ingestion
 │   ├── stock_prices/          ← OHLCV DJIA journalier (Massive API ou import)
-│   ├── stock_prices_1m/       ← OHLCV 1 min temps reel (Finnhub WebSocket)
-│   ├── news_reddit/           ← Headlines Reddit
-│   ├── news_combined/         ← Labels ML + Top1..Top25 (derive)
+│   ├── stock_prices_1m/       ← OHLCV 1 min temps réel (Finnhub WebSocket)
+│   ├── news_reddit/           ← Headlines Reddit (agrégé)
+│   ├── news_reddit_*/         ← Par subreddit (wallstreetbets, investing, …)
+│   ├── news_combined/         ← Labels ML + Top1..Top25 (dérivé)
 │   └── massive/day_aggs/      ← Cache flat files Massive (optionnel)
-├── silver/                    ← Nettoyage + enrichissement metadata
-├── gold/                      ← KPIs journaliers (schema fixe)
-└── ml/                        ← Modele + predictions + metrics
+├── silver/                    ← Nettoyage + enrichissement
+├── gold/                      ← KPIs journaliers (schéma fixe)
+└── ml/                        ← Modèles, prédictions et métriques
+    ├── market_direction_model.joblib   ← Modèle global DIA
+    ├── AAPL/, MSFT/, …                 ← Un dossier par symbole
 
-monitoring/                    ← Rapports JSON (cout, latence, qualite)
+monitoring/                    ← Rapports JSON (coût, latence, qualité)
 ```
 
-## Types de donnees
+### Types de données
 
-| Type | Couche Bronze | Description |
-|------|---------------|-------------|
-| **Structure** | `stock_prices` | OHLCV DJIA journalier (Date, Open, High, Low, Close, Volume) |
-| **Structure** | `stock_prices_1m` | OHLCV 1 min temps reel Finnhub (DIA) |
-| **Non structure** | `news_reddit` | Texte libre (headlines Reddit par date) |
-| **Hybride** | `news_combined` | News + label ML (0/1) |
+| Type | Table Bronze | Description |
+|------|--------------|-------------|
+| Structuré | `stock_prices` | OHLCV DJIA journalier (Date, Open, High, Low, Close, Volume) |
+| Structuré | `stock_prices_1m` | OHLCV 1 min temps réel Finnhub (DIA) |
+| Non structuré | `news_reddit` | Titres Reddit par date |
+| Hybride | `news_combined` | News + label ML (0 = baisse, 1 = hausse) |
 
-## Couches
+**Subreddits par défaut** : `stocks`, `wallstreetbets`, `StockMarket`, `investing`.
 
-### BRONZE — ELT (Extract + Load)
-- Chargement API (Massive, Arctic Shift) ou lecture bronze existant
+---
+
+## Pipeline ELT
+
+### Bronze — Extract + Load
+
+- Chargement API (Massive, Arctic Shift / PRAW) ou lecture du bronze existant
 - Stockage **Parquet** dans `lakehouse/bronze/`
-- Metadata : `_ingestion_ts`, `_source_file`, `_batch_id`, `_layer`
-- `news_combined` est **derive** automatiquement depuis stock + reddit
+- Métadonnées : `_ingestion_ts`, `_source_file`, `_batch_id`, `_layer`
+- `news_combined` est **dérivé** automatiquement depuis stock + reddit
 
-### SILVER — Nettoyage + Metadata
+### Silver — Nettoyage
+
 - **Stock** : déduplication, typage, flags qualité (`_quality_score`, `_is_invalid_ohlc`)
 - **News** : nettoyage texte, `_word_count`, `_headline_length`, `_has_finance_keyword`
 
-### GOLD — KPIs + Schéma fixe
+### Gold — KPIs journaliers
 
 | Colonne | Type | Description |
 |---------|------|-------------|
@@ -53,210 +225,226 @@ monitoring/                    ← Rapports JSON (cout, latence, qualite)
 | `avg_headline_length` | DOUBLE | Longueur moyenne des titres |
 | `finance_news_ratio` | DOUBLE | Part d'articles finance |
 | `market_direction` | VARCHAR | UP / DOWN / FLAT |
-| `computed_at` | TIMESTAMP | Horodatage calcul |
+| `computed_at` | TIMESTAMP | Horodatage du calcul |
 
-## Monitoring
+### Monitoring
 
 Chaque couche est mesurée sur 3 axes :
 
 | Métrique | Description |
 |----------|-------------|
 | **Latence** | Temps de traitement (ms) |
-| **Coût** | Estimation basée sur le stockage Parquet (tarif S3 ~$0.023/GB) |
+| **Coût** | Estimation basée sur le stockage Parquet (tarif S3 ~ $0.023/GB) |
 | **Qualité** | Score de complétude / validité des données |
 
-Les rapports sont exportés dans `monitoring/report_<batch>.json`.
+Rapports : `monitoring/report_<batch>.json` et `monitoring/metrics_history.parquet`.
 
-## Installation
+---
+
+## Machine learning
+
+### Modèle global (DIA / DJIA)
+
+Le pipeline principal entraîne une **régression logistique** sur :
+
+| Feature | Source |
+|---------|--------|
+| `daily_return_pct`, `volatility_5d` | Gold |
+| `news_count`, `finance_news_ratio` | Gold |
+| Titres Top1..Top25 (TF-IDF) | Silver `news_combined` |
+
+Artefacts : `lakehouse/ml/market_direction_model.joblib`, `metrics.json`, `predictions.parquet`.
+
+### Modèles par symbole
+
+Entraînement multi-symboles (OHLCV PostgreSQL + Reddit) :
 
 ```bash
-pip install -r requirements.txt
+# Tous les symboles configurés (DIA, AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA, JPM, XOM)
+python scripts/train_ml_symbols.py
+
+# Un symbole précis
+python scripts/train_ml_symbols.py --symbol AAPL --year 2026
 ```
 
-## Base de donnees (PostgreSQL) — donnees structurees
+Artefacts par symbole : `lakehouse/ml/<SYMBOLE>/`.
 
-Les donnees **structurees** (Silver/Gold) sont aussi chargees dans PostgreSQL (mode **replace** a chaque run) :
+---
+
+## Dashboard Streamlit
+
+Interface grand public sur **http://localhost:8502** (local) ou **8503** (profil HDFS).
+
+| Onglet | Contenu |
+|--------|---------|
+| **Parcours des données** | Schéma du pipeline, état des couches, dernier batch |
+| **Chiffres clés** | Métriques ML, volume de données, stats PostgreSQL |
+| **Analyses** | Market Carpet, courbe de prix, sentiment vs marché, features |
+| **Prévisions** | Résumé du modèle, prédictions hausse/baisse, graphiques |
+
+Le sélecteur de symbole dans la barre latérale permet de basculer entre DIA et les symboles entraînés individuellement.
+
+```bash
+python scripts/run_dashboard.py
+# ou
+python -m streamlit run dashboard/app.py --server.port 8502
+```
+
+---
+
+## Market Carpet
+
+Visualisation type **treemap sectorielle** (inspirée des « market carpets » boursiers) intégrée au dashboard.
+
+- Univers S&P 500 défini dans `dashboard/data/sp500_universe.json`
+- Métriques : performance, RSI, volume relatif
+- Périodes : 1J, 5J, 1M, 3M, 6M, 1A
+- Données OHLCV chargées depuis PostgreSQL (schéma `stocks`) si disponible
+
+Code : `src/marketcarpet/` + `dashboard/market_carpet.py`.
+
+---
+
+## PostgreSQL et import Dolt
+
+Les données **structurées** (Silver/Gold) sont chargées dans PostgreSQL (mode **replace** à chaque run) :
 
 - `silver_stock_prices`
 - `silver_news_reddit`
 - `silver_news_combined`
 - `gold_daily_market_kpis`
 
-### Connexion (Docker)
+### Connexion
 
-- **Host** : `localhost`
-- **Port** : `5432`
-- **Database** : `wherehouse`
-- **User** : `datax`
-- **Password** : `10102026Ha`
+Variables `PG*` dans `.env` (voir `.env.example`). Avec Docker Compose, le service `postgres` expose le port `5432`.
 
-Vous pouvez vous connecter avec **DBeaver / pgAdmin / PowerBI**.
+### Import Dolt → PostgreSQL (4 dépôts)
 
-### Import Dolt → PostgreSQL (4 depots)
-
-Depots supportes (un schema PostgreSQL par depot) :
-
-| Clone Dolt | Dossier | Schema PG |
+| Clone Dolt | Dossier | Schéma PG |
 |------------|---------|-----------|
 | `haftomt/stocks` | `stocks/` | `stocks` |
 | `post-no-preference/options` | `options/` | `options` |
 | `post-no-preference/rates` | `rates/` | `rates` |
 | `post-no-preference/earnings` | `earnings/` | `earnings` |
 
-Dans **ubuntu-box** (apres `dolt clone` dans `/data`) :
+Dans **ubuntu-box** (après `dolt clone` dans `/data`) :
 
 ```bash
-# Demarrer PostgreSQL
 docker compose --profile hdfs up -d postgres ubuntu
 
-# Cloner les depots (une fois)
 cd /data
 dolt clone haftomt/stocks
 dolt clone post-no-preference/options
 dolt clone post-no-preference/rates
 dolt clone post-no-preference/earnings
 
-# Verifier puis importer les 4 depots
 python3 /app/scripts/dolt_to_postgres.py --dry-run
 python3 /app/scripts/dolt_to_postgres.py
 ```
 
-Options utiles : `--repos stocks options`, `--tables ma_table`, `--dolt-root /chemin/vers/clones`.
+Options : `--repos stocks options`, `--tables ma_table`, `--dolt-root /chemin/vers/clones`.
 
-## Docker + HDFS (voir le cluster)
+---
 
-Le code HDFS existait mais **aucun service Hadoop** n'etait demarre. Utilisez le profil `hdfs` :
+## Docker — profils et services
 
 ```bash
-docker compose --profile hdfs up -d --build
+docker compose up -d dashboard              # Dashboard + PostgreSQL (local)
+docker compose --profile stream up -d       # + streaming Finnhub
+docker compose --profile hdfs up -d         # + cluster HDFS
+docker compose --profile spark up -d        # + Spark (nécessite hdfs)
+docker compose --profile airflow up -d      # + Airflow (nécessite hdfs)
+docker compose --profile pipeline up        # Exécution one-shot du pipeline
 ```
 
-Services demarres :
-| Service | URL / role |
-|---------|------------|
-| **NameNode UI** | http://localhost:9870 — explorer les fichiers HDFS |
-| **Dashboard HDFS** | http://localhost:8503 — lit les donnees depuis HDFS |
-| **PostgreSQL** | `localhost:5432` — base `wherehouse` (tables Silver/Gold) |
-| `hdfs-init` | copie `lakehouse/` local vers `/datax` sur HDFS (une fois) |
+| Profil | Services clés | URL |
+|--------|---------------|-----|
+| *(défaut)* | `dashboard`, `postgres` | http://localhost:8502 |
+| `stream` | `finnhub-stream` | — |
+| `hdfs` | `namenode`, `datanode`, `dashboard-hdfs`, `hdfs-init` | http://localhost:9870, http://localhost:8503 |
+| `spark` | `spark-master`, `spark-worker`, `spark-gold` | http://localhost:8080 |
+| `airflow` | `airflow-webserver`, `airflow-scheduler` | http://localhost:8081 |
+| `pipeline` | `pipeline` / `pipeline-hdfs` | — |
 
-Dans l'UI HDFS : **Utilities → Browse the file system** → `/datax/lakehouse/`
+Explorateur HDFS : **Utilities → Browse the file system** → `/datax/lakehouse/`
 
 ```bash
-# Pipeline sur HDFS
+# Pipeline sur HDFS (one-shot)
 docker compose --profile hdfs --profile pipeline up --build --abort-on-container-exit pipeline-hdfs
 
-# Arreter
+# Arrêter le cluster HDFS
 docker compose --profile hdfs down
 ```
 
-Mode local (sans HDFS) : `docker compose up dashboard` → http://localhost:8502
+---
 
-## Streaming temps reel (Finnhub — DIA 1 min)
+## Streaming temps réel (Finnhub)
 
 Flux WebSocket Finnhub → bougies OHLCV **1 minute** → `lakehouse/bronze/stock_prices_1m/`.
 
-Les donnees journalieres historiques (`lakehouse/bronze/stock_prices/`, Massive) **ne sont pas modifiees** : le stream ajoute uniquement dans `stock_prices_1m`.
+Les données journalières historiques (`stock_prices`, Massive) **ne sont pas modifiées**.
 
-### Prerequis
+### Prérequis
 
-1. Cle API dans `.env` :
 ```env
 FINNHUB_TOKEN=votre_cle
 FINNHUB_SYMBOL=DIA
 FINNHUB_BUCKET_MODE=minute
 ```
 
-2. Marche US ouvert (les bougies n'apparaissent que lorsqu'il y a des trades).
+Marché US ouvert recommandé (les bougies n'apparaissent qu'en cas de trades).
 
-> Mode journalier (optionnel, met a jour le jour en cours dans `stock_prices`) : `FINNHUB_BUCKET_MODE=day`
+> Mode journalier (optionnel) : `FINNHUB_BUCKET_MODE=day` met à jour le jour en cours dans `stock_prices`.
 
-### Lancer en local
-
-```bash
-python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse
-```
-
-- **Lakehouse temps reel** : `lakehouse/bronze/stock_prices_1m/data.parquet` (ajout incremental)
-
-### Lancer avec Docker (service long-running)
+### Lancer
 
 ```bash
 # Local
+python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse
+
+# Docker
 docker compose --profile stream up -d --build finnhub-stream
-
-# HDFS
-docker compose --profile hdfs up -d --build finnhub-stream-hdfs
-
-# Logs
 docker compose logs -f finnhub-stream
-
-# Arreter
-docker compose --profile stream down
 ```
 
-Le dashboard affiche historique journalier + temps reel 1 min dans l'onglet **Marche DIA**.
+Le dashboard affiche historique journalier + temps réel 1 min dans l'onglet **Analyses**.
 
-**Note** : le plan gratuit Finnhub peut imposer un delai (~15 min) sur les donnees US.
+**Note** : le plan gratuit Finnhub peut imposer un délai (~15 min) sur les données US.
 
-## Spark (Option A) — Spark pour Gold (ETL), ML reste en scikit-learn
+---
 
-Spark tourne en Docker (profil `spark`) et lit/ecrit directement sur **HDFS**.
+## Spark et Airflow
 
-### Demarrer Spark
+### Spark (couche Gold sur HDFS)
 
 ```bash
 docker compose --profile hdfs --profile spark up -d spark-master spark-worker
-```
-
-- **Spark UI** : http://localhost:8080
-
-### Executer le job Gold avec Spark
-
-```bash
 docker compose --profile hdfs --profile spark run --rm spark-gold
 ```
 
-Le job lit :
-- `hdfs://namenode:8020/datax/lakehouse/silver/stock_prices/data.parquet`
-- `hdfs://namenode:8020/datax/lakehouse/silver/news_reddit/data.parquet`
+Le job lit Silver sur HDFS et écrit `gold/daily_market_kpis/data.parquet`.
 
-et ecrit :
-- `hdfs://namenode:8020/datax/lakehouse/gold/daily_market_kpis/data.parquet` (overwrite)
+### Airflow — orchestration
 
-## Airflow — Orchestration du pipeline
-
-Le DAG `stock_market_lakehouse` enchaine les etapes du lakehouse avec monitoring et chargement PostgreSQL.
+DAG `stock_market_lakehouse` :
 
 ```
 init_batch → wait_hdfs → bronze_ingest → silver_transform → gold_spark
   → ml_train → postgres_warehouse → monitoring_report
 ```
 
-### Demarrer Airflow (HDFS + Spark + Airflow)
-
 ```bash
 docker compose --profile hdfs --profile spark --profile airflow up -d --build
 ```
 
-| Service | URL / role |
-|---------|------------|
-| **Airflow UI** | http://localhost:8081 — login `admin` / `admin` |
-| **DAG** | `stock_market_lakehouse` (planifie `@daily`) |
-| **Scheduler** | Execute les taches Python sur HDFS |
-| **Gold Spark** | Lance `spark-gold` via socket Docker |
+Déclenchement manuel : Airflow UI → **DAGs** → `stock_market_lakehouse` → **Trigger DAG**.
 
-### Declencher manuellement
-
-Dans l'UI Airflow : **DAGs** → `stock_market_lakehouse` → **Trigger DAG**.
-
-### Variables utiles (docker-compose)
-
-| Variable | Defaut | Description |
+| Variable | Défaut | Description |
 |----------|--------|-------------|
 | `GOLD_ENGINE` | `spark` | `spark` ou `python` (DuckDB) |
 | `PIPELINE_MASSIVE` | `true` | Source Massive pour stock_prices |
-| `PIPELINE_PREDICT_YEAR` | `2026` | Annee de prediction ML |
-| `AIRFLOW_DAG_SCHEDULE` | `@daily` | Cron Airflow |
+| `PIPELINE_PREDICT_YEAR` | `2026` | Année de prédiction ML |
+| `AIRFLOW_DAG_SCHEDULE` | `@daily` | Planification Airflow |
 
 ### CLI alternative (sans Airflow)
 
@@ -265,12 +453,13 @@ python scripts/pipeline_task.py bronze --batch-id <uuid>
 python scripts/pipeline_task.py gold_spark --batch-id <uuid>
 ```
 
-## Stockage : local ou HDFS
+---
 
-Par defaut le lakehouse est sur disque (`lakehouse/`). Pour basculer sur **HDFS** :
+## Stockage local ou HDFS
 
-```bash
-# .env
+Par défaut le lakehouse est sur disque (`lakehouse/`). Pour basculer sur **HDFS** :
+
+```env
 STORAGE_BACKEND=hdfs
 HDFS_NAMENODE=namenode
 HDFS_WEB_PORT=9870
@@ -280,21 +469,24 @@ HDFS_BASE_PATH=/datax
 ```
 
 ```bash
-# 1. Migrer les donnees locales vers HDFS (une fois)
+# Migrer les données locales vers HDFS (une fois)
 python scripts/upload_local_to_hdfs.py
 
-# 2. Pipeline lit/ecrit directement sur HDFS
+# Pipeline lit/écrit directement sur HDFS
 python pipeline/run_pipeline.py --massive --predict-year 2026
 ```
 
-Chemins HDFS :
+Chemins HDFS typiques :
+
 ```
 hdfs://namenode:8020/datax/lakehouse/bronze/stock_prices/data.parquet
 hdfs://namenode:8020/datax/lakehouse/gold/daily_market_kpis/data.parquet
 hdfs://namenode:8020/datax/monitoring/metrics_history.parquet
 ```
 
-## Execution
+---
+
+## Exécution complète
 
 ```bash
 # Pipeline complet (lit lakehouse/bronze/ existant)
@@ -303,72 +495,77 @@ python pipeline/run_pipeline.py --massive --predict-year 2026
 # Gold via Spark (HDFS)
 python pipeline/run_pipeline.py --massive --predict-year 2026 --gold-engine spark
 
-# Re-fetch APIs et re-ecrit bronze
+# Re-fetch APIs et ré-écrit bronze
 python pipeline/run_pipeline.py --refresh-bronze --massive --predict-year 2026
 
-# Fetch individuel vers lakehouse
+# Fetch individuel
 python scripts/fetch_massive_rest.py --from 2024-07-08 --to 2026-07-06
-
-# Stream temps reel Finnhub (DIA, bougies 1 min -> lakehouse/bronze/stock_prices_1m/)
-# FINNHUB_TOKEN dans .env ; marche US ouverte recommande
-python scripts/stream_finnhub_ohlcv.py --ticker DIA --lakehouse
-
-# Ou via Docker (service long-running)
-docker compose --profile stream up -d finnhub-stream
 python scripts/fetch_reddit_news.py --from 2024-07-08 --to 2026-07-06
 
-# Dashboard interactif (port 8502 par defaut)
-python scripts/run_dashboard.py
+# ML multi-symboles
+python scripts/train_ml_symbols.py --year 2026
 
-# Ou manuellement sur un port specifique :
-python -m streamlit run dashboard/app.py --server.port 8502
-
-# Tests automatises
+# Tests
 pytest tests/ -v
 ```
 
-Les rapports de monitoring sont exportés dans :
-- `monitoring/report_<batch>.json` — snapshot du batch
-- `monitoring/metrics_history.parquet` — historique longitudinal (coût, latence, qualité)
+---
 
 ## Structure du code
 
 ```
 src/
-├── config.py              ← Chemins, types de donnees, schema Gold
-├── db/postgres.py          ← Ecriture/lecture PostgreSQL (warehouse)
-├── pipeline/lakehouse_tasks.py  ← Taches modulaires (CLI + Airflow)
-├── bronze/ingest.py       ← Ingestion ELT
-├── silver/transform.py    ← Nettoyage + metadata
-├── gold/aggregate.py      ← Agregation KPIs (DuckDB)
-└── monitoring/metrics.py  ← Metriques par couche
+├── config.py                 ← Chemins, symboles ML, schéma Gold
+├── db/postgres.py            ← Warehouse PostgreSQL
+├── pipeline/lakehouse_tasks.py ← Tâches modulaires (CLI + Airflow)
+├── bronze/                   ← Ingestion (Massive, Reddit, Finnhub)
+├── silver/transform.py       ← Nettoyage + métadonnées
+├── gold/aggregate.py         ← Agrégation KPIs (DuckDB)
+├── ml/train.py               ← Entraînement ML
+├── marketcarpet/             ← Treemap sectorielle S&P 500
+└── monitoring/metrics.py     ← Métriques par couche
+
+dashboard/
+├── app.py                    ← Dashboard Streamlit (4 onglets)
+└── market_carpet.py          ← Composant Market Carpet
 
 dags/stock_market_lakehouse_dag.py  ← DAG Airflow
-pipeline/run_pipeline.py   ← Orchestrateur monolithique (inclut ML)
-scripts/pipeline_task.py   ← Une tache pipeline en CLI
-dashboard/app.py           ← Dashboard Streamlit
-tests/                     ← Tests pytest
-src/ml/train.py            ← Entrainement ML (Combined_News_DJIA)
+pipeline/run_pipeline.py      ← Orchestrateur monolithique
+scripts/                      ← CLI (fetch, stream, ML, Dolt, …)
+spark/jobs/gold_job.py        ← Job Spark Gold
+tests/                        ← Tests pytest
 ```
 
-## ML — Prediction direction marche
+---
 
-Utilise `lakehouse/bronze/news_combined` (Label 0/1) joint aux KPIs Gold :
+## Tests
 
-| Feature | Source |
-|---------|--------|
-| `daily_return_pct`, `volatility_5d` | Gold |
-| `news_count`, `finance_news_ratio` | Gold |
-| `combined_finance_ratio`, `combined_avg_length` | Silver (news_combined) |
+```bash
+pytest tests/ -v
+```
 
-Modele : **LogisticRegression** — artefacts dans `lakehouse/ml/`.
+Couverture : couches Bronze/Silver/Gold, ML, streaming Finnhub, Market Carpet.
+
+Via Docker :
+
+```bash
+docker compose run --rm test
+```
+
+---
 
 ## Technologies
 
-- **Python 3.10+**
-- **Pandas / PyArrow** — manipulation et stockage Parquet
-- **DuckDB** — requetes SQL analytiques inter-couches
-- **Scikit-learn** — modele ML baseline
-- **Streamlit** — dashboard monitoring + KPIs
-- **Apache Airflow** — orchestration DAG (profil `airflow`)
-- **Pytest** — tests automatises
+| Composant | Technologie |
+|-----------|-------------|
+| Langage | Python 3.10+ |
+| Stockage | Parquet (Pandas / PyArrow), HDFS optionnel |
+| SQL analytique | DuckDB |
+| ML | Scikit-learn (LogisticRegression + TF-IDF) |
+| Dashboard | Streamlit, Plotly, Altair |
+| Orchestration | Apache Airflow |
+| Big Data | Apache Spark (couche Gold), Hadoop HDFS |
+| Base relationnelle | PostgreSQL |
+| Données versionnées | Dolt → PostgreSQL |
+| Tests | Pytest |
+| Conteneurisation | Docker Compose |

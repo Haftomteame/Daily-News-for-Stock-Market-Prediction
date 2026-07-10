@@ -21,15 +21,21 @@ def massive_cache_dir() -> str:
     return join_path("lakehouse", "bronze", "massive", "day_aggs")
 
 
-def ml_model_path() -> str:
+def ml_model_path(symbol: str | None = None) -> str:
+    if symbol:
+        return join_path("lakehouse", "ml", symbol.upper(), "market_direction_model.joblib")
     return ml_file("market_direction_model.joblib")
 
 
-def ml_metrics_path() -> str:
+def ml_metrics_path(symbol: str | None = None) -> str:
+    if symbol:
+        return join_path("lakehouse", "ml", symbol.upper(), "metrics.json")
     return ml_file("metrics.json")
 
 
-def ml_predictions_path() -> str:
+def ml_predictions_path(symbol: str | None = None) -> str:
+    if symbol:
+        return join_path("lakehouse", "ml", symbol.upper(), "predictions.parquet")
     return ml_file("predictions.parquet")
 
 

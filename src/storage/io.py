@@ -204,13 +204,20 @@ def read_joblib(path: str) -> Any:
 
 
 def query_duckdb(sql: str, tables: dict[str, str]) -> pd.DataFrame:
-    """Execute SQL DuckDB en chargeant les Parquet via fsspec (local ou HDFS)."""
+    """Execute SQL DuckDB sur des Parquet (lecture directe en local, buffer HDFS)."""
     import duckdb
 
     con = duckdb.connect()
     try:
         for alias, path in tables.items():
-            con.register(alias, read_parquet(path))
+            if is_hdfs():
+                con.register(alias, read_parquet(path))
+            else:
+                con.execute(
+                    f'CREATE OR REPLACE TEMP VIEW "{alias}" AS '
+                    "SELECT * FROM read_parquet(?)",
+                    [path],
+                )
         return con.execute(sql).df()
     finally:
         con.close()
