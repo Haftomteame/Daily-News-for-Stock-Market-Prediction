@@ -210,7 +210,7 @@ def _build_mini_chart(
             fill="tozeroy",
             fillcolor=f"rgba({'21,128,61' if end >= start else '220,38,38'},0.08)",
             hovertemplate=(
-                "%{x|%d/%m/%Y}<br>Clôture : %{y:,.2f} $<extra></extra>"
+                "%{x|%d/%m/%Y}<br>Clôture ajustée : %{y:,.2f} $<extra></extra>"
             ),
         )
     )
@@ -345,16 +345,9 @@ def _ohlcv_row_count() -> int | None:
 
 
 def _pg_connection_hint() -> str:
-    import os
+    from src.db.postgres import pg_connection_hint
 
-    host = os.getenv("PGHOST", "localhost")
-    if host == "postgres":
-        return (
-            "Le dashboard utilise `PGHOST=postgres` (nom du conteneur Docker). "
-            "Cela ne fonctionne **que dans Docker**. En local sur Windows, mettez "
-            "`PGHOST=localhost` dans `.env`."
-        )
-    return f"Vérifiez que PostgreSQL écoute sur `{host}` et que le mot de passe est correct."
+    return pg_connection_hint()
 
 
 def _render_ohlcv_error(meta: dict) -> None:

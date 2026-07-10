@@ -36,6 +36,7 @@ from src.db.postgres import (  # noqa: E402
     warehouse_table_stats,
 )
 from dashboard.market_carpet import render_market_carpet  # noqa: E402
+from src.finance.price_adjust import adjust_ohlcv_for_splits, load_symbol_splits  # noqa: E402
 from src.storage.io import (  # noqa: E402
     exists,
     glob_paths,
@@ -600,7 +601,9 @@ def load_stock_ohlcv(symbol: str, date_range: tuple | None = None) -> pd.DataFra
     try:
         df = read_sql(sql, params=params)
         df["date"] = _parse_date(df["date"])
-        return df.dropna(subset=["date"])
+        df = df.dropna(subset=["date"])
+        splits = load_symbol_splits(symbol)
+        return adjust_ohlcv_for_splits(df, splits)
     except Exception:
         return pd.DataFrame()
 
@@ -1257,11 +1260,11 @@ def _build_stock_price_figure(
             x=ohlcv["date"],
             y=ohlcv["close"],
             mode="lines",
-            name="Clôture",
+            name="Clôture ajustée",
             line={"color": "#4338ca", "width": 2.5},
             hovertemplate=(
                 "Date : %{x|%d/%m/%Y}<br>"
-                "Clôture : %{y:,.2f} $<br>"
+                "Clôture ajustée : %{y:,.2f} $<br>"
                 "<extra></extra>"
             ),
         )
@@ -1276,9 +1279,9 @@ def _build_stock_price_figure(
         )
     fig.update_layout(
         height=340,
-        title=f"Cours de clôture — {symbol.upper()}",
+        title=f"Cours de clôture ajusté (splits) — {symbol.upper()}",
         xaxis_title="Date",
-        yaxis_title="Clôture (USD)",
+        yaxis_title="Clôture ajustée (USD)",
         hovermode="x unified",
         margin={"l": 48, "r": 16, "t": 48, "b": 40},
         showlegend=False,
@@ -1324,14 +1327,14 @@ def _render_year_stock_detail(
         .mark_bar(color="#818cf8")
         .encode(
             x=alt.X("month:N", sort=list(monthly["month"]), title="Mois"),
-            y=alt.Y("close:Q", title="Clôture fin de mois (USD)"),
+            y=alt.Y("close:Q", title="Clôture ajustée fin de mois (USD)"),
             tooltip=[
                 alt.Tooltip("month:N", title="Mois"),
-                alt.Tooltip("close:Q", title="Clôture", format=",.2f"),
+                alt.Tooltip("close:Q", title="Clôture ajustée", format=",.2f"),
                 alt.Tooltip("volume:Q", title="Volume", format=","),
             ],
         )
-        .properties(height=220, title=f"Clôture mensuelle — {year}")
+        .properties(height=220, title=f"Clôture mensuelle ajustée — {year}")
     )
     _show_altair(monthly_chart)
 
@@ -1372,8 +1375,9 @@ def render_stock_price(symbol: str, date_range: tuple | None = None) -> None:
                 <strong>Évolution du cours — {symbol.upper()}</strong>
                 <span class="badge badge-volume">Actions</span>
             </div>
-            <p class="card-desc">Historique des prix de clôture depuis la base financière
-            (PostgreSQL). Survolez la courbe, puis cliquez une année pour voir le détail.</p>
+            <p class="card-desc">Historique des prix de clôture <strong>ajustés pour les fractionnements
+            d'actions</strong> (table <code>stocks.split</code>, PostgreSQL). Les dividendes ne sont pas
+            réajustés. Survolez la courbe, puis cliquez une année pour voir le détail.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1656,6 +1660,48 @@ def render_bottom_charts(
             _show_altair(influence_chart)
 
 
+def _prediction_years(
+    predictions: pd.DataFrame,
+    ml_metrics: dict | None,
+) -> list[int]:
+    if not predictions.empty and "holdout_year" in predictions.columns:
+        years = sorted(int(y) for y in predictions["holdout_year"].dropna().unique())
+        if years:
+            return years
+    if not predictions.empty and "date" in predictions.columns:
+        years = sorted(int(y) for y in predictions["date"].dt.year.unique())
+        if years:
+            return years
+    if ml_metrics:
+        if ml_metrics.get("prediction_years"):
+            return [int(y) for y in ml_metrics["prediction_years"]]
+        if ml_metrics.get("prediction_year"):
+            return [int(ml_metrics["prediction_year"])]
+    return []
+
+
+def _filter_ml_predictions(
+    predictions: pd.DataFrame,
+    year: int | None,
+    date_range: tuple | None,
+) -> pd.DataFrame:
+    pred_view = predictions.copy()
+    if year is not None:
+        if "holdout_year" in pred_view.columns:
+            pred_view = pred_view[pred_view["holdout_year"] == year]
+        elif "date" in pred_view.columns:
+            pred_view = pred_view[pred_view["date"].dt.year == year]
+    if date_range and not pred_view.empty and "date" in pred_view.columns:
+        start, end = date_range
+        pred_view = pred_view[
+            (pred_view["date"] >= pd.Timestamp(start))
+            & (pred_view["date"] <= pd.Timestamp(end))
+        ]
+    if "date" in pred_view.columns:
+        pred_view = pred_view.sort_values("date")
+    return pred_view
+
+
 def render_ml_summary(
     ml_metrics: dict | None,
     predictions: pd.DataFrame,
@@ -1688,10 +1734,28 @@ def render_ml_summary(
               help="Parmi les vraies hausses, combien le modèle a-t-il repérées ?")
     c4.metric("Score global", f"{ml_metrics.get('f1', 0):.0%}",
               help="Synthèse entre fiabilité et couverture des hausses.")
+    holdout_year = ml_metrics.get("prediction_year", "—")
     c5.metric("Jours testés", f"{ml_metrics.get('samples_predict', 0):,}",
-              help="Nombre de jours utilisés pour vérifier les prévisions en 2026.")
+              help=f"Nombre de jours utilisés pour vérifier les prévisions en {holdout_year}.")
 
     if not predictions.empty and "probability_up" in predictions.columns:
+        years = _prediction_years(predictions, ml_metrics)
+        selected_year: int | None = None
+        if len(years) > 1:
+            year_options = ["Toutes les années", *[str(y) for y in years]]
+            year_pick = st.selectbox(
+                "Année des prévisions",
+                year_options,
+                help="Filtrez la courbe de confiance et la répartition des signaux par année.",
+            )
+            if year_pick != "Toutes les années":
+                selected_year = int(year_pick)
+        elif len(years) == 1 and not ml_metrics.get("prediction_years"):
+            st.caption(
+                f"Prévisions disponibles pour **{years[0]}** seulement. "
+                "Relancez `python scripts/train_ml_symbols.py` pour générer toutes les années."
+            )
+
         threshold = st.slider(
             "Seuil de confiance « hausse » (%)",
             min_value=40,
@@ -1700,10 +1764,21 @@ def render_ml_summary(
             step=5,
             help="Ajustez le seuil au-dessus duquel le modèle annonce une hausse.",
         )
-        pred_view = predictions.copy()
+        pred_view = _filter_ml_predictions(predictions, selected_year, date_range)
+        if pred_view.empty:
+            st.warning("Aucune prévision pour la période sélectionnée.")
+            render_stock_price(symbol, date_range=date_range)
+            return
+        pred_view = pred_view.copy()
         pred_view["signal"] = (
             pred_view["probability_up"] >= threshold / 100
         ).map({True: "Hausse prédite", False: "Baisse / stable"})
+
+        multi_year = selected_year is None and len(years) > 1
+        date_axis = alt.Axis(format="%b %Y" if multi_year else "%b")
+        chart_title = "Confiance du modèle dans le temps"
+        if selected_year is not None:
+            chart_title = f"Confiance du modèle — {selected_year}"
 
         col_a, col_b = st.columns([2, 1])
         with col_a:
@@ -1722,7 +1797,7 @@ def render_ml_summary(
                     interpolate="monotone",
                 )
                 .encode(
-                    x=alt.X("date:T", title="Date"),
+                    x=alt.X("date:T", title="Date", axis=date_axis),
                     y=alt.Y("probability_up:Q", title="Probabilité de hausse", scale=alt.Scale(domain=[0, 1])),
                     tooltip=[
                         alt.Tooltip("date:T", title="Date", format="%d/%m/%Y"),
@@ -1730,7 +1805,7 @@ def render_ml_summary(
                         alt.Tooltip("signal:N", title="Signal"),
                     ],
                 )
-                .properties(height=280, title="Confiance du modèle dans le temps")
+                .properties(height=280, title=chart_title)
                 .interactive()
             )
             rule = (
@@ -1743,6 +1818,9 @@ def render_ml_summary(
         with col_b:
             signal_counts = pred_view["signal"].value_counts().reset_index()
             signal_counts.columns = ["signal", "count"]
+            pie_title = f"Signaux (seuil {threshold}%)"
+            if selected_year is not None:
+                pie_title = f"Signaux {selected_year} (seuil {threshold}%)"
             pie = (
                 alt.Chart(signal_counts)
                 .mark_arc(innerRadius=40)
@@ -1751,7 +1829,7 @@ def render_ml_summary(
                     color=alt.Color("signal:N", legend=alt.Legend(title="")),
                     tooltip=[alt.Tooltip("signal:N"), alt.Tooltip("count:Q", format=",")],
                 )
-                .properties(height=280, title=f"Signaux (seuil {threshold}%)")
+                .properties(height=280, title=pie_title)
             )
             _show_altair(pie)
 

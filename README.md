@@ -12,19 +12,20 @@ Projet d'architecture **DataX** : un lakehouse **Medallion** (Bronze / Silver / 
 4. [Prérequis et installation](#prérequis-et-installation)
 5. [Configuration](#configuration)
 6. [Architecture des données](#architecture-des-données)
-7. [Pipeline ELT](#pipeline-elt)
-8. [Machine learning](#machine-learning)
-9. [Dashboard Streamlit](#dashboard-streamlit)
-10. [Market Carpet](#market-carpet)
-11. [PostgreSQL et import Dolt](#postgresql-et-import-dolt)
-12. [Docker — profils et services](#docker--profils-et-services)
-13. [Streaming temps réel (Finnhub)](#streaming-temps-réel-finnhub)
-14. [Spark et Airflow](#spark-et-airflow)
-15. [Stockage local ou HDFS](#stockage-local-ou-hdfs)
-16. [Exécution complète](#exécution-complète)
-17. [Structure du code](#structure-du-code)
-18. [Tests](#tests)
-19. [Technologies](#technologies)
+7. [Sources d'ingestion (détail)](#sources-dingestion-détail)
+8. [Pipeline ELT](#pipeline-elt)
+9. [Machine learning](#machine-learning)
+10. [Dashboard Streamlit](#dashboard-streamlit)
+11. [Market Carpet](#market-carpet)
+12. [PostgreSQL et import Dolt](#postgresql-et-import-dolt)
+13. [Docker — profils et services](#docker--profils-et-services)
+14. [Streaming temps réel (Finnhub)](#streaming-temps-réel-finnhub)
+15. [Spark et Airflow](#spark-et-airflow)
+16. [Stockage local ou HDFS](#stockage-local-ou-hdfs)
+17. [Exécution complète](#exécution-complète)
+18. [Structure du code](#structure-du-code)
+19. [Tests](#tests)
+20. [Technologies](#technologies)
 
 ---
 
@@ -34,13 +35,13 @@ Ce dépôt implémente une chaîne de traitement de bout en bout :
 
 | Étape | Rôle |
 |-------|------|
-| **Ingestion** | Récupérer des prix OHLCV (Massive, Finnhub) et des titres Reddit |
+| **Ingestion** | Multi-sources : OHLCV (Massive, Finnhub), marchés structurés Dolt → PostgreSQL (actions, options, taux, résultats), titres Reddit (4 subreddits) — voir [Sources d'ingestion](#sources-dingestion-détail) |
 | **Transformation** | Nettoyer, enrichir et agréger les données (couches Silver et Gold) |
-| **Prédiction** | Entraîner un modèle de classification hausse/baisse à partir des news + KPIs |
-| **Visualisation** | Dashboard interactif (parcours des données, KPIs, prévisions, market carpet) |
+| **Prédiction** | Classifier la direction du marché (hausse/baisse) à partir des titres Reddit (TF-IDF) et des KPIs |
+| **Visualisation** | Dashboard interactif (parcours des données, KPIs, prévisions, market carpet S&P 500) |
 | **Orchestration** | Pipeline CLI, Docker ou Airflow avec monitoring (latence, coût, qualité) |
 
-**Cas d'usage principal** : comprendre comment le sentiment et le volume d'actualités Reddit se corrèlent aux mouvements du DJIA (indice DIA) et à d'autres symboles (AAPL, MSFT, NVDA, etc.).
+**Cas d'usage principal** : analyser le lien entre l'activité Reddit et les mouvements du DJIA (**DIA**), avec des données de marché enrichies (OHLCV multi-symboles, options, taux, bilans) pour le dashboard et le ML sur **AAPL**, **MSFT**, **GOOGL**, **AMZN**, **NVDA**, **META**, **TSLA**, **JPM**, **XOM**.
 
 ---
 
@@ -195,6 +196,149 @@ monitoring/                    ← Rapports JSON (coût, latence, qualité)
 | Hybride | `news_combined` | News + label ML (0 = baisse, 1 = hausse) |
 
 **Subreddits par défaut** : `stocks`, `wallstreetbets`, `StockMarket`, `investing`.
+
+---
+
+## Sources d'ingestion (détail)
+
+Le projet ne s'appuie pas sur une seule API : les données arrivent par **deux chemins complémentaires** (lakehouse Parquet + entrepôt PostgreSQL).
+
+```mermaid
+flowchart TB
+    subgraph apis [APIs temps réel / historique]
+        M[Massive S3 + REST]
+        F[Finnhub WebSocket]
+        A[Arctic Shift Reddit]
+        P[PRAW Reddit]
+    end
+
+    subgraph dolt [Dépôts Dolt clonés]
+        S[stocks]
+        O[options]
+        R[rates]
+        E[earnings]
+    end
+
+    subgraph bronze [Lakehouse Bronze Parquet]
+        SP[stock_prices]
+        SP1[stock_prices_1m]
+        NR[news_reddit / news_reddit_*]
+        NC[news_combined]
+    end
+
+    subgraph pg [PostgreSQL wherehouse]
+        WS[silver_* / gold_*]
+        DS[stocks.*]
+        DO[options.*]
+        DR[rates.*]
+        DE[earnings.*]
+    end
+
+    M --> SP
+    F --> SP1
+    A --> NR
+    P --> NR
+    SP --> NC
+    NR --> NC
+    S --> DS
+    O --> DO
+    R --> DR
+    E --> DE
+    bronze --> WS
+```
+
+### 1. Données structurées — Lakehouse (pipeline Medallion)
+
+Ces flux alimentent `lakehouse/bronze/` puis Silver / Gold.
+
+| Source | Script / service | Table Bronze | Contenu |
+|--------|------------------|--------------|---------|
+| **Massive** (flat files S3) | `scripts/fetch_massive_day_aggs.py`, pipeline `--massive` | `stock_prices`, `massive_day_aggs` | OHLCV **journalier** ETF DIA (cache gzip S3, prioritaire) |
+| **Massive** (REST API) | `scripts/fetch_massive_rest.py` | `stock_prices` | Fallback si pas de cache S3 (`MASSIVE_API_KEY`) |
+| **Finnhub** (WebSocket) | `scripts/stream_finnhub_ohlcv.py`, service `finnhub-stream` | `stock_prices_1m` (défaut) ou `stock_prices` (mode `day`) | Bougies **1 min** ou jour en cours, symbole `FINNHUB_SYMBOL` (défaut DIA) |
+
+Ordre de priorité Massive : **cache S3** → téléchargement S3 → **API REST**.
+
+### 2. Données structurées — PostgreSQL (import Dolt)
+
+Données de marché **multi-actifs** importées depuis des dépôts [Dolt](https://www.dolthub.com/) clonés dans `ubuntu-box`, puis chargées dans PostgreSQL (`scripts/dolt_to_postgres.py`). Un **schéma par dépôt** :
+
+| Clone Dolt | Schéma PG | Domaine | Tables principales |
+|------------|-----------|---------|-------------------|
+| `haftomt/stocks` | `stocks` | Actions | `ohlcv`, `symbol`, `dividend`, `split` |
+| `post-no-preference/options` | `options` | Dérivés | `option_chain` |
+| `post-no-preference/rates` | `rates` | Macro | `us_treasury` |
+| `post-no-preference/earnings` | `earnings` | Fondamentaux | `earnings_calendar`, `eps_estimate`, `eps_history`, `income_statement`, `balance_sheet_*`, `cash_flow_statement`, `sales_estimate`, `rank_score` |
+
+**Utilisation** :
+- **Market Carpet** : OHLCV S&P 500 depuis `stocks.ohlcv`
+- **ML multi-symboles** : KPIs journaliers depuis `stocks.ohlcv` + Reddit
+- **Dashboard** : onglet « Chiffres clés » — stats par schéma / table / symbole
+
+Ces données **ne passent pas** par Bronze Parquet : elles vivent directement dans l'entrepôt PostgreSQL.
+
+### 3. Reddit — actualités non structurées
+
+Reddit est la source textuelle du projet. Deux modes de collecte :
+
+| Mode | API | Usage | Credentials |
+|------|-----|-------|-------------|
+| **Historique** (défaut) | [Arctic Shift](https://arctic-shift.photon-reddit.com/) | Plage de dates `--from` / `--to`, pagination jour par jour | Aucun |
+| **Récent** | **PRAW** (`--praw`) | Derniers posts d'un subreddit | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` |
+
+#### Subreddits ciblés
+
+| Subreddit | Thème | Table Bronze dédiée (optionnelle) |
+|-----------|-------|-----------------------------------|
+| `stocks` | Investissement général | `news_reddit_stocks` |
+| `wallstreetbets` | Trading spéculatif / meme stocks | `news_reddit_wallstreetbets` |
+| `StockMarket` | Marchés et indices | `news_reddit_stockmarket` |
+| `investing` | Long terme, éducation finance | `news_reddit_investing` |
+
+#### Format stocké (Bronze)
+
+Chaque enregistrement contient :
+- `Date` — jour UTC du post
+- `News` — titre du post Reddit (headline)
+- `subreddit` — origine (si disponible)
+
+Métadonnées d'ingestion : `_ingestion_ts`, `_source_file`, `_batch_id`, `_layer`.
+
+#### Organisation des tables
+
+| Table | Rôle |
+|-------|------|
+| `news_reddit_*` | Une table **par subreddit** (fetch parallèle, reprise incrémentale) |
+| `news_reddit` | Table **agrégée** (fusion de toutes les sources Reddit) |
+| `news_combined` | Table **dérivée** : joint prix DIA + tops Reddit + label ML (0/1) |
+
+```bash
+# Fetch historique par subreddit (exemple)
+python scripts/fetch_reddit_news.py --from 2024-07-08 --to 2026-07-06 \
+  --subreddit wallstreetbets --table news_reddit_wallstreetbets --append
+
+# Fusionner toutes les tables news_reddit_* → news_reddit
+python scripts/merge_reddit_bronze.py
+```
+
+Options utiles de `fetch_reddit_news.py` :
+- `--append` — ajouter sans écraser l'existant (déduplication `Date` + `News`)
+- `--skip-existing` — ne fetcher qu'à partir de la dernière date déjà en bronze
+- `--max-per-day` / `--max-total` — limites pour tests rapides
+- `--partial` — sauvegarde CSV de secours en cas d'interruption
+
+Le pipeline principal (`run_bronze_ingestion`) lit **`news_reddit`** agrégé. Si vous n'avez que des tables par subreddit, lancez `merge_reddit_bronze.py` avant le pipeline.
+
+### 4. Synthèse — qui va où ?
+
+| Besoin | Source à utiliser |
+|--------|-------------------|
+| Pipeline lakehouse DIA (Bronze → Gold → ML global) | Massive + `news_reddit` + `news_combined` |
+| Prix temps réel 1 min | Finnhub → `stock_prices_1m` |
+| OHLCV multi-symboles, options, bilans | Dolt → PostgreSQL |
+| ML par symbole (AAPL, NVDA, …) | PostgreSQL `stocks.ohlcv` + Reddit |
+| Treemap S&P 500 | PostgreSQL `stocks.ohlcv` + `sp500_universe.json` |
+| Dashboard warehouse | PostgreSQL (Silver/Gold + schémas Dolt) |
 
 ---
 

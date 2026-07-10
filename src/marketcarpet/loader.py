@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.db.postgres import pg_enabled, read_sql
+from src.finance.price_adjust import adjust_ohlcv_for_splits, load_symbol_splits
 
 
 def _bind_in_clause(symbols: list[str]) -> tuple[str, dict]:
@@ -50,4 +51,10 @@ def load_ohlcv_panel(
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-    return df.dropna(subset=["date", "close"]).sort_values(["symbol", "date"])
+    df = df.dropna(subset=["date", "close"]).sort_values(["symbol", "date"])
+
+    adjusted_chunks: list[pd.DataFrame] = []
+    for symbol, grp in df.groupby("symbol", sort=False):
+        splits = load_symbol_splits(symbol)
+        adjusted_chunks.append(adjust_ohlcv_for_splits(grp, splits))
+    return pd.concat(adjusted_chunks, ignore_index=True)

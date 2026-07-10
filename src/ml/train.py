@@ -13,6 +13,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sqlalchemy.exc import OperationalError
 
 from src.bronze.build_combined import aggregate_reddit_tops, compute_labels
 from src.config import (
@@ -23,7 +24,8 @@ from src.config import (
     gold_data_path,
     silver_data_path,
 )
-from src.db.postgres import pg_enabled, read_sql
+from src.db.postgres import pg_connection_hint, pg_enabled, read_sql
+from src.finance.price_adjust import adjust_ohlcv_for_splits, load_symbol_splits
 from src.silver.transform import _has_finance_keyword
 from src.storage.io import exists, query_duckdb, write_json, write_joblib, write_parquet
 from src.storage.paths import ml_metrics_path, ml_model_path, ml_predictions_path
@@ -161,6 +163,11 @@ def _load_ohlcv_kpis(symbol: str) -> pd.DataFrame:
     if raw.empty:
         return pd.DataFrame()
 
+    raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+    raw = raw.dropna(subset=["date"]).sort_values("date")
+    splits = load_symbol_splits(symbol)
+    raw = adjust_ohlcv_for_splits(raw, splits)
+
     stock = raw.rename(
         columns={
             "date": "Date",
@@ -229,6 +236,77 @@ def _temporal_split(
         predict_df = df[df["date"].dt.year == year].copy()
 
     return train_df, predict_df, year
+
+
+def _fit_model(
+    train_df: pd.DataFrame,
+    random_state: int,
+    best_params: dict | None = None,
+) -> Pipeline:
+    if best_params:
+        model = _build_model(
+            random_state,
+            max_features=int(best_params["max_features"]),
+            min_df=int(best_params["min_df"]),
+            C=float(best_params["C"]),
+        )
+    else:
+        model = _build_model(random_state)
+    X_train = _feature_matrix(train_df)
+    y_train = train_df["label"].astype(int)
+    model.fit(X_train, y_train)
+    return model
+
+
+def _annotate_predictions(
+    predict_df: pd.DataFrame,
+    model: Pipeline,
+    *,
+    symbol: str,
+    batch_id: str,
+    holdout_year: int,
+) -> pd.DataFrame:
+    X_predict = _feature_matrix(predict_df)
+    y_pred = model.predict(X_predict)
+    predictions = predict_df.copy()
+    predictions["symbol"] = symbol
+    predictions["predicted_label"] = y_pred
+    predictions["probability_up"] = model.predict_proba(X_predict)[:, 1]
+    predictions["correct"] = predictions["predicted_label"] == predictions["label"]
+    predictions["holdout_year"] = holdout_year
+    predictions["_batch_id"] = batch_id
+    predictions["_split"] = "predict"
+    return predictions
+
+
+def _walk_forward_predictions(
+    df: pd.DataFrame,
+    symbol: str,
+    batch_id: str,
+    random_state: int,
+    best_params: dict | None = None,
+) -> pd.DataFrame:
+    """Prédictions out-of-sample année par année (walk-forward temporel)."""
+    available_years = sorted(int(y) for y in df["date"].dt.year.unique())
+    chunks: list[pd.DataFrame] = []
+    for year in available_years:
+        train_df = df[df["date"].dt.year < year].copy()
+        predict_df = df[df["date"].dt.year == year].copy()
+        if len(train_df) < 50 or predict_df.empty:
+            continue
+        model = _fit_model(train_df, random_state, best_params)
+        chunks.append(
+            _annotate_predictions(
+                predict_df,
+                model,
+                symbol=symbol,
+                batch_id=batch_id,
+                holdout_year=year,
+            )
+        )
+    if not chunks:
+        return pd.DataFrame()
+    return pd.concat(chunks, ignore_index=True).sort_values("date")
 
 
 def _feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -449,16 +527,23 @@ def run_ml_training(
     metrics_path = ml_metrics_path(symbol)
     predictions_path = ml_predictions_path(symbol)
 
+    predictions = _walk_forward_predictions(
+        df, symbol, batch_id, random_state, best_params
+    )
+    if predictions.empty:
+        predictions = _annotate_predictions(
+            predict_df,
+            model,
+            symbol=symbol,
+            batch_id=batch_id,
+            holdout_year=prediction_year,
+        )
+    metrics["prediction_years"] = sorted(
+        int(y) for y in predictions["holdout_year"].unique()
+    )
+
     write_joblib(production_model, model_path)
     write_json(metrics, metrics_path)
-
-    predictions = predict_df.copy()
-    predictions["symbol"] = symbol
-    predictions["predicted_label"] = y_pred
-    predictions["probability_up"] = model.predict_proba(X_predict)[:, 1]
-    predictions["correct"] = predictions["predicted_label"] == predictions["label"]
-    predictions["_batch_id"] = batch_id
-    predictions["_split"] = "predict"
     write_parquet(predictions, predictions_path)
 
     if symbol == MASSIVE_TICKER:
@@ -501,6 +586,10 @@ def run_ml_training_all(
             )
             acc = trained[symbol]["metrics"]["accuracy"]
             print(f"  OK {symbol} — accuracy holdout {acc:.0%}", flush=True)
+        except OperationalError as exc:
+            hint = pg_connection_hint()
+            print(f"  ERREUR PostgreSQL — {hint}", flush=True)
+            raise SystemExit(1) from exc
         except (ValueError, FileNotFoundError) as exc:
             errors[symbol] = str(exc)
             print(f"  SKIP {symbol} — {exc}", flush=True)

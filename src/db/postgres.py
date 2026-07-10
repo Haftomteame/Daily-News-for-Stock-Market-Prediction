@@ -3,15 +3,48 @@
 from __future__ import annotations
 
 import os
+import socket
 from contextlib import contextmanager
+from functools import lru_cache
+from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 
-def pg_dsn() -> str:
+@lru_cache(maxsize=1)
+def pg_host() -> str:
+    """Resout PGHOST : `postgres` (Docker) -> `localhost` hors conteneur."""
     host = os.getenv("PGHOST", "localhost")
+    if host != "postgres":
+        return host
+    if Path("/.dockerenv").exists():
+        return host
+    try:
+        socket.getaddrinfo(host, None)
+        return host
+    except socket.gaierror:
+        return "localhost"
+
+
+def pg_connection_hint() -> str:
+    configured = os.getenv("PGHOST", "localhost")
+    resolved = pg_host()
+    if configured == "postgres" and resolved == "localhost":
+        return (
+            "`PGHOST=postgres` ne fonctionne qu'à l'intérieur de Docker ; "
+            "connexion automatique via `localhost`. "
+            "Vérifiez que PostgreSQL tourne (`docker compose --profile hdfs up -d postgres`)."
+        )
+    return (
+        f"Vérifiez que PostgreSQL écoute sur `{resolved}` "
+        f"(port {os.getenv('PGPORT', '5432')}) et que le mot de passe est correct."
+    )
+
+
+def pg_dsn() -> str:
+    host = pg_host()
     port = os.getenv("PGPORT", "5432")
     db = os.getenv("PGDATABASE", "wherehouse")
     user = os.getenv("PGUSER", "datax")
